@@ -14,6 +14,7 @@ import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
+import dev.deusbr.luminaa55.model.AutoLiveDecision
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.PhotometricStats
 import dev.deusbr.luminaa55.model.SceneConcept
@@ -164,9 +165,9 @@ class SceneConceptEngine {
     }
 
     /**
-     * Lightweight real-time preview concept hint from low-res live frames.
+     * Lightweight real-time preview concept & automatic configuration decision from live frames.
      */
-    suspend fun quickLiveHint(bitmap: Bitmap): String = withContext(Dispatchers.Default) {
+    suspend fun quickLiveHint(bitmap: Bitmap): AutoLiveDecision = withContext(Dispatchers.Default) {
         val small = scaleDown(bitmap, 224)
         val input = InputImage.fromBitmap(small, 0)
         val faces = runCatching { faceDetector.process(input).await() }.getOrDefault(emptyList())
@@ -193,7 +194,12 @@ class SceneConceptEngine {
             subjectRatio = if (faces.isNotEmpty()) 0.32f else 0.0f,
             hasConfidentMask = faces.isNotEmpty()
         )
-        "${concept.conceptTitle} · ${concept.recommendedStock.badge}"
+        AutoLiveDecision(
+            headline = concept.conceptTitle,
+            subtitle = "${concept.recommendedStock.displayName} · ${concept.lighting.labelPt} · Denoise ${concept.recommendedBurstCount}x",
+            recommendedStock = concept.recommendedStock,
+            recommendedBurst = concept.recommendedBurstCount
+        )
     }
 
     private fun floatBufferMaskToBitmap(buffer: FloatBuffer, w: Int, h: Int): Bitmap {

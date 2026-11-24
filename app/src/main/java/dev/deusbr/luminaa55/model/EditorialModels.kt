@@ -2,6 +2,17 @@ package dev.deusbr.luminaa55.model
 
 import android.graphics.Bitmap
 
+enum class CameraExperienceMode(val label: String) {
+    NORMAL("Normal"),
+    PRO("Pro")
+}
+
+enum class ProDeckTab(val label: String) {
+    EXPOSURE("Exposição"),
+    FILM("Película"),
+    ENGINE("Motor")
+}
+
 enum class FilmStock(
     val displayName: String,
     val subtitle: String,
@@ -31,7 +42,7 @@ enum class CaptureMode(
     val label: String,
     val description: String
 ) {
-    EDITORIAL_BURST("Ensaio HDR+", "Rajada YUV multi-quadro + look contextual"),
+    EDITORIAL_BURST("Estúdio Full-Res", "Sensor em resolução máxima + limpeza de sombra"),
     SAMSUNG_HDR("Samsung HDR", "Extensão nativa CameraX HDR do A55"),
     SAMSUNG_NIGHT("Samsung Night", "Extensão nativa noturna do ISP Exynos"),
     SAMSUNG_BOKEH("Samsung Bokeh", "Extensão nativa de retrato")
@@ -112,20 +123,33 @@ data class SceneConcept(
     val hasConfidentMask: Boolean = true,
     val lighting: LightDirection,
     val recommendedStock: FilmStock,
+    val recommendedBurstCount: Int = 3,
     val appliedAdjustments: List<String>,
     val recipe: EditRecipe
 )
 
+data class AutoLiveDecision(
+    val headline: String,
+    val subtitle: String,
+    val recommendedStock: FilmStock,
+    val recommendedBurst: Int
+)
+
 data class CapturedPhotoSession(
     val originalBitmap: Bitmap,
+    val previewOriginalBitmap: Bitmap,
     val subjectMaskBitmap: Bitmap?,
     val processedBitmap: Bitmap,
+    val previewProcessedBitmap: Bitmap,
+    val exifBytes: ByteArray? = null,
     val concept: SceneConcept,
     val burstFramesMerged: Int,
     val gpuAccelerated: Boolean,
     val processingTimeMs: Long,
     val lensUsed: LensOption,
+    val capturedFromProMode: Boolean = false,
     val savedUriString: String? = null,
+    val fullResMatchesCurrentRecipe: Boolean = true,
     val cachedStats: PhotometricStats? = null,
     val cachedLabels: List<String> = emptyList(),
     val cachedFaceCount: Int = 0,

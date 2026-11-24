@@ -2,7 +2,7 @@ package dev.deusbr.luminaa55.shader
 
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
-import android.graphics.Color
+import android.graphics.Canvas
 import android.graphics.HardwareRenderer
 import android.graphics.Paint
 import android.graphics.PixelFormat
@@ -13,7 +13,6 @@ import android.hardware.HardwareBuffer
 import android.media.ImageReader
 import dev.deusbr.luminaa55.model.EditRecipe
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -26,15 +25,20 @@ data class ShaderRenderResult(
 )
 
 /**
- * Hardware-accelerated AGSL RuntimeShader pipeline targeting Galaxy A55 Xclipse 530 (RDNA2) GPU,
- * with a calibrated CPU fallback matching foreground/background mask separation and sRGB midtones.
+ * Hardware-accelerated AGSL RuntimeShader pipeline with seamless tiled execution for >4096px
+ * full-sensor Galaxy A55 captures (12MP / 32MP / 50MP) and calibrated CPU fallback.
  */
 object EditorialShaderEngine {
+
+    private const val MAX_SINGLE_PASS_DIM = 4096
+    private const val TILE_CORE_SIZE = 2048
+    private const val TILE_PAD = 48
 
     private const val AGSL_EDITORIAL_SHADER = """
         uniform shader inputImage;
         uniform shader subjectMask;
-        uniform float2 imageSize;
+        uniform float2 fullImageSize;
+        uniform float2 tileOrigin;
         uniform float2 maskSize;
 
         uniform float hasSubjectMask;
@@ -67,23 +71,24 @@ object EditorialShaderEngine {
             return fract((p3.x + p3.y) * p3.z);
         }
 
-        float sampleMaskAt(float2 coord) {
-            float2 uv = clamp(coord / max(imageSize, float2(1.0)), float2(0.0), float2(1.0));
+        float sampleMaskGlobal(float2 globalCoord) {
+            float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
             return clamp(float(subjectMask.eval(uv * maskSize).r), 0.0, 1.0);
         }
 
         half4 main(float2 fragCoord) {
-            float2 uv = fragCoord / max(imageSize, float2(1.0));
-            float minDim = min(imageSize.x, imageSize.y);
-            float mask = hasSubjectMask > 0.5 ? sampleMaskAt(fragCoord) : 1.0;
+            float2 globalCoord = fragCoord + tileOrigin;
+            float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
+            float minDim = min(fullImageSize.x, fullImageSize.y);
+            float mask = hasSubjectMask > 0.5 ? sampleMaskGlobal(globalCoord) : 1.0;
             float bgWeight = hasSubjectMask > 0.5 ? smoothstep(0.20, 0.88, 1.0 - mask) : 0.0;
 
             half4 baseSample = inputImage.eval(fragCoord);
             half3 rgb = baseSample.rgb;
 
-            // 1. Optical background-only bokeh (resolution-scaled Vogel disk with foreground bleed protection)
+            // 1. Optical background-only bokeh (resolution-scaled Vogel disk with foreground bleed guard)
             if (backgroundBokeh > 0.01 && bgWeight > 0.02) {
-                float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.013, 6.0, 34.0);
+                float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.012, 6.0, 36.0);
                 half3 acc = rgb;
                 float weightSum = 1.0;
 
@@ -100,41 +105,41 @@ object EditorialShaderEngine {
                 float2 d10 = float2(0.84, -0.18);
                 float2 d11 = float2(-0.18, 0.92);
 
-                float2 sc = fragCoord + d0 * radius; float w0 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w0; weightSum += w0;
-                sc = fragCoord + d1 * radius; float w1 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w1; weightSum += w1;
-                sc = fragCoord + d2 * radius; float w2 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w2; weightSum += w2;
-                sc = fragCoord + d3 * radius; float w3 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w3; weightSum += w3;
-                sc = fragCoord + d4 * radius; float w4 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w4; weightSum += w4;
-                sc = fragCoord + d5 * radius; float w5 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w5; weightSum += w5;
-                sc = fragCoord + d6 * radius; float w6 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w6; weightSum += w6;
-                sc = fragCoord + d7 * radius; float w7 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w7; weightSum += w7;
-                sc = fragCoord + d8 * radius; float w8 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w8; weightSum += w8;
-                sc = fragCoord + d9 * radius; float w9 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w9; weightSum += w9;
-                sc = fragCoord + d10 * radius; float w10 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w10; weightSum += w10;
-                sc = fragCoord + d11 * radius; float w11 = 1.0 - smoothstep(0.5, 0.9, sampleMaskAt(sc));
-                acc += inputImage.eval(sc).rgb * w11; weightSum += w11;
+                float2 off; float w;
+                off = d0 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d1 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d2 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d3 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d4 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d5 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d6 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d7 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d8 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d9 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d10 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
+                off = d11 * radius; w = 1.0 - smoothstep(0.5, 0.9, sampleMaskGlobal(globalCoord + off));
+                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
 
                 rgb = mix(rgb, acc / max(weightSum, 0.001), bgWeight);
             }
 
-            // Skin detector for protecting natural complexion against over-sharpening and tint drift
             float skinScore = smoothstep(0.05, 0.24, float(rgb.r - rgb.b)) *
                               smoothstep(0.02, 0.14, float(rgb.r - rgb.g)) *
                               smoothstep(0.18, 0.85, float(rgb.r));
 
-            // 2. Resolution-scaled subtle clarity & specular Black Pro-Mist + Halation
-            float blurStep = clamp(minDim * 0.0032, 2.0, 8.0);
+            // 2. Micro-acutance + resolution-scaled clarity + specular Pro-Mist & Halation
+            float blurStep = clamp(minDim * 0.0028, 2.0, 8.0);
             half3 localBlur = (
                 inputImage.eval(fragCoord + float2(blurStep, 0.0)).rgb +
                 inputImage.eval(fragCoord - float2(blurStep, 0.0)).rgb +
@@ -142,14 +147,14 @@ object EditorialShaderEngine {
                 inputImage.eval(fragCoord - float2(0.0, blurStep)).rgb
             ) * 0.25;
 
-            float clarityAtten = (1.0 - skinScore * 0.72) * (1.0 - bgWeight * 0.65);
-            rgb = clamp(rgb + (rgb - localBlur) * clarity * clarityAtten, 0.0, 1.0);
+            float fineDetailGain = (clarity + 0.05) * (1.0 - skinScore * 0.78) * (1.0 - bgWeight * 0.75);
+            rgb = clamp(rgb + (rgb - localBlur) * fineDetailGain, 0.0, 1.0);
 
             float lumLocal = luma(localBlur);
             float mistMask = smoothstep(0.68, 0.99, lumLocal);
-            rgb = mix(rgb, max(rgb, localBlur), mistMask * proMistStrength * 0.35);
+            rgb = mix(rgb, max(rgb, localBlur), mistMask * proMistStrength * 0.34);
 
-            float haloSpread = clamp(minDim * 0.006, 4.0, 14.0);
+            float haloSpread = clamp(minDim * 0.005, 4.0, 14.0);
             half3 haloAvg = (
                 inputImage.eval(fragCoord + float2(haloSpread, haloSpread)).rgb +
                 inputImage.eval(fragCoord + float2(-haloSpread, haloSpread)).rgb +
@@ -159,32 +164,27 @@ object EditorialShaderEngine {
             float haloEnergy = smoothstep(0.84, 1.0, luma(haloAvg));
             rgb += half3(1.0, 0.34, 0.14) * haloEnergy * halationStrength * 0.26 * (1.0 - skinScore * 0.85);
 
-            // 3. Linearize to scene-referred space while preserving midtone anchor
+            // 3. Linearize while preserving midtone exposure
             half3 lin = pow(clamp(rgb, 0.0, 1.0), half3(2.2));
 
-            // 4. Contextual exposure, subject relight (only foreground) & background negative fill (only background)
             float relight = 1.0 + faceRelightGain * (hasSubjectMask > 0.5 ? mask : 0.0) - backgroundDimming * bgWeight;
             float skyFactor = smoothstep(0.55, 0.0, uv.y) * (1.0 - mask * hasSubjectMask) * smoothstep(0.45, 0.92, luma(rgb));
             float skyGain = 1.0 - skyRecovery * skyFactor * 0.36;
             lin *= exp2(exposureOffset) * clamp(relight, 0.78, 1.38) * skyGain;
 
-            // 5. White balance with skin protection
             float wbDamp = mix(1.0, 1.0 - skinProtection * 0.55, skinScore);
             lin.r *= 1.0 + warmth * 0.32 * wbDamp;
             lin.b *= 1.0 - warmth * 0.30 * wbDamp;
             lin.g *= 1.0 + tint * 0.18 * wbDamp;
 
-            // 6. Gentle linear shadow toe & shoulder highlight roll-off (NO linear contrast crush!)
             float lumLin = luma(lin);
             lin += half3(shadowLift * 0.04 * (1.0 - smoothstep(0.0, 0.22, lumLin)));
             float over = max(0.0, lumLin - 0.52);
             float shoulder = 1.0 / (1.0 + over * highlightRollOff * 0.95);
             lin *= mix(1.0, shoulder, smoothstep(0.48, 1.15, lumLin));
 
-            // Convert back to sRGB BEFORE perceptual contrast and color grading
+            // 4. Convert back to sRGB BEFORE perceptual contrast
             half3 srgb = pow(clamp(lin, 0.0, 1.0), half3(1.0 / 2.2));
-
-            // 7. True perceptual sRGB contrast pivot at 0.48 + saturation
             srgb = clamp((srgb - 0.48) * contrast + 0.48, 0.0, 1.0);
 
             float lumOut = luma(srgb);
@@ -196,12 +196,11 @@ object EditorialShaderEngine {
                 srgb = clamp(mix(half3(lumOut), srgb, satEffective), 0.0, 1.0);
             }
 
-            // 8. Soft optical vignette + fine 35mm film grain
-            float2 centered = (uv - 0.5) * float2(1.0, imageSize.y / max(imageSize.x, 1.0));
+            float2 centered = (uv - 0.5) * float2(1.0, fullImageSize.y / max(fullImageSize.x, 1.0));
             float distSq = dot(centered, centered);
             srgb *= clamp(1.0 - distSq * vignetteStrength * 0.95, 0.55, 1.0);
 
-            float grain = (hash12(fragCoord) - 0.5) * grainAmount * 0.08 * (1.0 - abs(lumOut - 0.5));
+            float grain = (hash12(globalCoord) - 0.5) * grainAmount * 0.08 * (1.0 - abs(lumOut - 0.5));
             srgb = clamp(srgb + half3(grain), 0.0, 1.0);
 
             return half4(srgb, baseSample.a);
@@ -217,7 +216,20 @@ object EditorialShaderEngine {
     ): ShaderRenderResult {
         val scaledRecipe = scaleRecipeIntensity(recipe, intensity.coerceIn(0f, 1.5f))
         val gpuBitmap = runCatching {
-            renderWithHardwareRuntimeShader(source, subjectMask, scaledRecipe, hasConfidentMask)
+            if (max(source.width, source.height) <= MAX_SINGLE_PASS_DIM) {
+                renderSingleTileGpu(
+                    tileSource = source,
+                    subjectMask = subjectMask,
+                    fullW = source.width,
+                    fullH = source.height,
+                    tileOriginX = 0f,
+                    tileOriginY = 0f,
+                    recipe = scaledRecipe,
+                    hasConfidentMask = hasConfidentMask
+                )
+            } else {
+                renderTiledGpu(source, subjectMask, scaledRecipe, hasConfidentMask)
+            }
         }.getOrNull()
 
         if (gpuBitmap != null) {
@@ -252,18 +264,75 @@ object EditorialShaderEngine {
         )
     }
 
-    private fun renderWithHardwareRuntimeShader(
+    private fun renderTiledGpu(
         source: Bitmap,
         subjectMask: Bitmap,
         recipe: EditRecipe,
         hasConfidentMask: Boolean
     ): Bitmap {
-        val w = source.width
-        val h = source.height
+        val fullW = source.width
+        val fullH = source.height
+        val output = Bitmap.createBitmap(fullW, fullH, Bitmap.Config.ARGB_8888)
+        val outCanvas = Canvas(output)
+
+        var y = 0
+        while (y < fullH) {
+            val coreH = min(TILE_CORE_SIZE, fullH - y)
+            val srcY0 = max(0, y - TILE_PAD)
+            val srcY1 = min(fullH, y + coreH + TILE_PAD)
+            val srcH = srcY1 - srcY0
+
+            var x = 0
+            while (x < fullW) {
+                val coreW = min(TILE_CORE_SIZE, fullW - x)
+                val srcX0 = max(0, x - TILE_PAD)
+                val srcX1 = min(fullW, x + coreW + TILE_PAD)
+                val srcW = srcX1 - srcX0
+
+                val subSrc = Bitmap.createBitmap(source, srcX0, srcY0, srcW, srcH)
+                val subRendered = renderSingleTileGpu(
+                    tileSource = subSrc,
+                    subjectMask = subjectMask,
+                    fullW = fullW,
+                    fullH = fullH,
+                    tileOriginX = srcX0.toFloat(),
+                    tileOriginY = srcY0.toFloat(),
+                    recipe = recipe,
+                    hasConfidentMask = hasConfidentMask
+                )
+                subSrc.recycle()
+
+                val cropX = x - srcX0
+                val cropY = y - srcY0
+                val coreTile = Bitmap.createBitmap(subRendered, cropX, cropY, coreW, coreH)
+                subRendered.recycle()
+                outCanvas.drawBitmap(coreTile, x.toFloat(), y.toFloat(), null)
+                coreTile.recycle()
+
+                x += TILE_CORE_SIZE
+            }
+            y += TILE_CORE_SIZE
+        }
+        return output
+    }
+
+    private fun renderSingleTileGpu(
+        tileSource: Bitmap,
+        subjectMask: Bitmap,
+        fullW: Int,
+        fullH: Int,
+        tileOriginX: Float,
+        tileOriginY: Float,
+        recipe: EditRecipe,
+        hasConfidentMask: Boolean
+    ): Bitmap {
+        val w = tileSource.width
+        val h = tileSource.height
         val shader = RuntimeShader(AGSL_EDITORIAL_SHADER)
-        shader.setInputShader("inputImage", BitmapShader(source, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        shader.setInputShader("inputImage", BitmapShader(tileSource, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setInputShader("subjectMask", BitmapShader(subjectMask, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        shader.setFloatUniform("imageSize", w.toFloat(), h.toFloat())
+        shader.setFloatUniform("fullImageSize", fullW.toFloat(), fullH.toFloat())
+        shader.setFloatUniform("tileOrigin", tileOriginX, tileOriginY)
         shader.setFloatUniform("maskSize", subjectMask.width.toFloat(), subjectMask.height.toFloat())
 
         shader.setFloatUniform("hasSubjectMask", if (hasConfidentMask) 1.0f else 0.0f)
@@ -324,7 +393,7 @@ object EditorialShaderEngine {
     }
 
     /**
-     * Pure-Kotlin calibrated editorial pipeline with background bokeh & foreground preservation.
+     * Memory-safe row-streamed CPU fallback matching the calibrated GPU tone pipeline.
      */
     private fun renderCpuFallback(
         source: Bitmap,
@@ -334,89 +403,121 @@ object EditorialShaderEngine {
     ): Bitmap {
         val w = source.width
         val h = source.height
-        val srcPx = IntArray(w * h)
-        source.getPixels(srcPx, 0, w, 0, 0, w, h)
-
         val scaledMask = if (subjectMask.width == w && subjectMask.height == h) {
             subjectMask
         } else {
             Bitmap.createScaledBitmap(subjectMask, w, h, true)
         }
-        val maskPx = IntArray(w * h)
-        scaledMask.getPixels(maskPx, 0, w, 0, 0, w, h)
-        if (scaledMask !== subjectMask) scaledMask.recycle()
 
+        val outBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val minDim = min(w, h)
         val maxBokehRadius = (minDim * 0.011f * recipe.backgroundBokeh).coerceIn(4f, 22f).toInt()
-        val outPx = IntArray(w * h)
+        val stripRows = 256
+        val srcRow = IntArray(w)
+        val maskRow = IntArray(w)
 
-        for (y in 0 until h) {
-            val ny = y.toFloat() / h - 0.5f
-            for (x in 0 until w) {
-                val i = y * w + x
-                val mask = if (hasConfidentMask) ((maskPx[i] ushr 16) and 0xFF) / 255f else 1.0f
-                val bgWeight = if (hasConfidentMask) smoothstep(0.20f, 0.88f, 1f - mask) else 0f
-
-                var r: Float
-                var g: Float
-                var b: Float
-
-                if (hasConfidentMask && recipe.backgroundBokeh > 0.01f && bgWeight > 0.02f) {
-                    val rad = max(1, (maxBokehRadius * bgWeight).toInt())
-                    var sumR = 0f; var sumG = 0f; var sumB = 0f; var wSum = 0f
-                    val offsets = arrayOf(
-                        0 to 0, rad to 0, -rad to 0, 0 to rad, 0 to -rad,
-                        (rad * 0.7f).toInt() to (rad * 0.7f).toInt(),
-                        -(rad * 0.7f).toInt() to (rad * 0.7f).toInt(),
-                        (rad * 0.7f).toInt() to -(rad * 0.7f).toInt(),
-                        -(rad * 0.7f).toInt() to -(rad * 0.7f).toInt()
+        // When no background bokeh is needed, process purely row-by-row for zero OOM risk on 50MP
+        if (!hasConfidentMask || recipe.backgroundBokeh <= 0.01f) {
+            val outRow = IntArray(w)
+            for (y in 0 until h) {
+                source.getPixels(srcRow, 0, w, 0, y, w, 1)
+                scaledMask.getPixels(maskRow, 0, w, 0, y, w, 1)
+                val ny = y.toFloat() / h - 0.5f
+                for (x in 0 until w) {
+                    val c = srcRow[x]
+                    val mask = if (hasConfidentMask) ((maskRow[x] ushr 16) and 0xFF) / 255f else 1.0f
+                    outRow[x] = applyEditorialToneToPixel(
+                        r = ((c ushr 16) and 0xFF) / 255f,
+                        g = ((c ushr 8) and 0xFF) / 255f,
+                        b = (c and 0xFF) / 255f,
+                        nx = x.toFloat() / w - 0.5f,
+                        ny = ny,
+                        x = x, y = y,
+                        mask = mask,
+                        hasConfidentMask = hasConfidentMask,
+                        recipe = recipe
                     )
-                    for ((dx, dy) in offsets) {
-                        val sx = (x + dx).coerceIn(0, w - 1)
-                        val sy = (y + dy).coerceIn(0, h - 1)
-                        val si = sy * w + sx
-                        val sm = ((maskPx[si] ushr 16) and 0xFF) / 255f
-                        val sampleW = (1f - smoothstep(0.5f, 0.9f, sm)).coerceAtLeast(0.05f)
-                        val sc = srcPx[si]
-                        sumR += ((sc ushr 16) and 0xFF) * sampleW
-                        sumG += ((sc ushr 8) and 0xFF) * sampleW
-                        sumB += (sc and 0xFF) * sampleW
-                        wSum += sampleW
-                    }
-                    val baseC = srcPx[i]
-                    val br = ((baseC ushr 16) and 0xFF) / 255f
-                    val bg = ((baseC ushr 8) and 0xFF) / 255f
-                    val bb = (baseC and 0xFF) / 255f
-                    val blurR = (sumR / wSum) / 255f
-                    val blurG = (sumG / wSum) / 255f
-                    val blurB = (sumB / wSum) / 255f
-                    r = br * (1f - bgWeight) + blurR * bgWeight
-                    g = bg * (1f - bgWeight) + blurG * bgWeight
-                    b = bb * (1f - bgWeight) + blurB * bgWeight
-                } else {
-                    val c = srcPx[i]
-                    r = ((c ushr 16) and 0xFF) / 255f
-                    g = ((c ushr 8) and 0xFF) / 255f
-                    b = (c and 0xFF) / 255f
                 }
-
-                outPx[i] = applyEditorialToneToPixel(
-                    r = r, g = g, b = b,
-                    nx = x.toFloat() / w - 0.5f,
-                    ny = ny,
-                    x = x, y = y,
-                    mask = mask,
-                    hasConfidentMask = hasConfidentMask,
-                    recipe = recipe
-                )
+                outBmp.setPixels(outRow, 0, w, 0, y, w, 1)
             }
+            if (scaledMask !== subjectMask) scaledMask.recycle()
+            return outBmp
         }
 
-        return Bitmap.createBitmap(outPx, w, h, Bitmap.Config.ARGB_8888)
+        val srcPx = IntArray(w * min(h, stripRows + maxBokehRadius * 2))
+        val maskPx = IntArray(w * min(h, stripRows + maxBokehRadius * 2))
+
+        var y0 = 0
+        while (y0 < h) {
+            val yEnd = min(h, y0 + stripRows)
+            val readTop = max(0, y0 - maxBokehRadius)
+            val readBot = min(h, yEnd + maxBokehRadius)
+            val readH = readBot - readTop
+            source.getPixels(srcPx, 0, w, 0, readTop, w, readH)
+            scaledMask.getPixels(maskPx, 0, w, 0, readTop, w, readH)
+
+            val outStrip = IntArray(w * (yEnd - y0))
+            for (y in y0 until yEnd) {
+                val localY = y - readTop
+                val ny = y.toFloat() / h - 0.5f
+                val outRowOffset = (y - y0) * w
+                for (x in 0 until w) {
+                    val idx = localY * w + x
+                    val mask = ((maskPx[idx] ushr 16) and 0xFF) / 255f
+                    val bgWeight = smoothstep(0.20f, 0.88f, 1f - mask)
+
+                    val r: Float; val g: Float; val b: Float
+                    if (bgWeight > 0.02f) {
+                        val rad = max(1, (maxBokehRadius * bgWeight).toInt())
+                        var sumR = 0f; var sumG = 0f; var sumB = 0f; var wSum = 0f
+                        val d7 = (rad * 0.7f).toInt()
+                        val offsets = arrayOf(
+                            0 to 0, rad to 0, -rad to 0, 0 to rad, 0 to -rad,
+                            d7 to d7, -d7 to d7, d7 to -d7, -d7 to -d7
+                        )
+                        for ((dx, dy) in offsets) {
+                            val sx = (x + dx).coerceIn(0, w - 1)
+                            val sy = (localY + dy).coerceIn(0, readH - 1)
+                            val si = sy * w + sx
+                            val sm = ((maskPx[si] ushr 16) and 0xFF) / 255f
+                            val sw = (1f - smoothstep(0.5f, 0.9f, sm)).coerceAtLeast(0.05f)
+                            val sc = srcPx[si]
+                            sumR += ((sc ushr 16) and 0xFF) * sw
+                            sumG += ((sc ushr 8) and 0xFF) * sw
+                            sumB += (sc and 0xFF) * sw
+                            wSum += sw
+                        }
+                        val bc = srcPx[idx]
+                        r = (((bc ushr 16) and 0xFF) / 255f) * (1f - bgWeight) + (sumR / wSum / 255f) * bgWeight
+                        g = (((bc ushr 8) and 0xFF) / 255f) * (1f - bgWeight) + (sumG / wSum / 255f) * bgWeight
+                        b = ((bc and 0xFF) / 255f) * (1f - bgWeight) + (sumB / wSum / 255f) * bgWeight
+                    } else {
+                        val c = srcPx[idx]
+                        r = ((c ushr 16) and 0xFF) / 255f
+                        g = ((c ushr 8) and 0xFF) / 255f
+                        b = (c and 0xFF) / 255f
+                    }
+                    outStrip[outRowOffset + x] = applyEditorialToneToPixel(
+                        r = r, g = g, b = b,
+                        nx = x.toFloat() / w - 0.5f,
+                        ny = ny,
+                        x = x, y = y,
+                        mask = mask,
+                        hasConfidentMask = true,
+                        recipe = recipe
+                    )
+                }
+            }
+            outBmp.setPixels(outStrip, 0, w, 0, y0, w, yEnd - y0)
+            y0 += stripRows
+        }
+
+        if (scaledMask !== subjectMask) scaledMask.recycle()
+        return outBmp
     }
 
     /**
-     * Pure-Kotlin per-pixel color & tone grading (directly JVM unit-testable).
+     * Pure-Kotlin calibrated per-pixel grading (JVM unit-testable).
      */
     fun applyEditorialToneToPixel(
         r: Float,
@@ -458,7 +559,6 @@ object EditorialShaderEngine {
         val rollScale = (1f - shoulderMix) + shoulder * shoulderMix
         lr *= rollScale; lg *= rollScale; lb *= rollScale
 
-        // Convert linear -> sRGB before perceptual contrast
         var sr = lr.coerceIn(0f, 1f).pow(1f / 2.2f)
         var sg = lg.coerceIn(0f, 1f).pow(1f / 2.2f)
         var sb = lb.coerceIn(0f, 1f).pow(1f / 2.2f)

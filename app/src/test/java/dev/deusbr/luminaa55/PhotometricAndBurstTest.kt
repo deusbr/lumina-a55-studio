@@ -132,4 +132,21 @@ class PhotometricAndBurstTest {
         val cr = (cleaned[8 * w + 8] ushr 16) and 0xFF
         assertTrue("Expected smoothed dark pixel between 36 and 46, got $cr", cr in 36..46)
     }
+
+    @Test
+    fun autoModeRecommendsHigherBurstInLowLightAndLighterInDaylight() {
+        val darkPx = solidFrame(32, 32, 16, 18, 24)
+        val darkStats = PhotometricAnalyzer.analyzeArgbPixels(darkPx, 32, 32)
+        val nightConcept = PhotometricAnalyzer.buildConceptProfile(
+            stats = darkStats, labels = listOf("Night"), faceCount = 0, subjectRatio = 1f, hasConfidentMask = false
+        )
+        assertEquals(5, nightConcept.recommendedBurstCount)
+
+        val dayPx = solidFrame(32, 32, 185, 190, 195)
+        val dayStats = PhotometricAnalyzer.analyzeArgbPixels(dayPx, 32, 32)
+        val dayConcept = PhotometricAnalyzer.buildConceptProfile(
+            stats = dayStats, labels = listOf("Landscape"), faceCount = 0, subjectRatio = 1f, hasConfidentMask = false
+        )
+        assertEquals(1, dayConcept.recommendedBurstCount)
+    }
 }

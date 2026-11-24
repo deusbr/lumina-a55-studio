@@ -287,6 +287,12 @@ object PhotometricAnalyzer {
             adjustments.add("Curva fílmica natural + controle de altas luzes")
         }
 
+        val autoBurst = when {
+            isNight -> 5
+            isBacklit || hasPerson || stats.shadowRatio > 0.25f -> 3
+            else -> 1
+        }
+
         return SceneConcept(
             conceptTitle = conceptTitle,
             conceptSummary = conceptSummary,
@@ -296,6 +302,7 @@ object PhotometricAnalyzer {
             hasConfidentMask = hasConfidentMask,
             lighting = stats.lightDirection,
             recommendedStock = activeStock,
+            recommendedBurstCount = autoBurst,
             appliedAdjustments = adjustments,
             recipe = EditRecipe(
                 filmStock = activeStock,

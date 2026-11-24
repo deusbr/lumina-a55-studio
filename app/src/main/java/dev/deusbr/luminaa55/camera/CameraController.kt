@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -48,6 +49,12 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.max
 
+data class RawCaptureOutput(
+    val fullResBitmap: Bitmap,
+    val exifBytes: ByteArray?,
+    val framesDenoised: Int
+)
+
 class CameraController(private val context: Context) {
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -56,7 +63,6 @@ class CameraController(private val context: Context) {
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
 
-    // Dedicated executors prevent live preview hints from blocking shutter capture
     private val captureExecutor = Executors.newSingleThreadExecutor()
     private val analysisExecutor = Executors.newSingleThreadExecutor()
 
@@ -88,18 +94,36 @@ class CameraController(private val context: Context) {
         val baseSelector = buildSelectorForLens(lens, hardwareProfile)
         val finalSelector = resolveExtensionSelector(baseSelector, captureMode, extMgr)
 
-        val preview = Preview.Builder().build().also {
-            it.surfaceProvider = previewView.surfaceProvider
-        }
-
-        val capture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+        val preview = Preview.Builder()
             .setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
                     .build()
             )
             .build()
+            .also { it.surfaceProvider = previewView.surfaceProvider }
+
+        val captureBuilder = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setJpegQuality(100)
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                    .build()
+            )
+
+        // Request maximum ISP quality (demosaic, noise reduction, edge sharpness, aberration correction)
+        runCatching {
+            Camera2Interop.Extender(captureBuilder)
+                .setCaptureRequestOption(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+                .setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+                    CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+                )
+        }
+        val capture = captureBuilder.build()
 
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -109,8 +133,7 @@ class CameraController(private val context: Context) {
         analysis.setAnalyzer(analysisExecutor) { proxy ->
             try {
                 val now = System.currentTimeMillis()
-                // Only decode a frame when a live hint refresh is actually due (~1.2s)
-                if (now - lastHintTimestampMs > 1200L) {
+                if (now - lastHintTimestampMs > 1150L) {
                     lastHintTimestampMs = now
                     val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(proxy)
                     onLiveFrameForHint(bmp)
@@ -128,7 +151,6 @@ class CameraController(private val context: Context) {
             imageCapture = capture
             imageAnalysis = analysis
 
-            // Samsung One UI routes 0.5x ultrawide through minZoomRatio when physical ID is logical-grouped
             val zoomState = cam.cameraInfo.zoomState.value
             val minZ = zoomState?.minZoomRatio ?: 0.5f
             val maxZ = zoomState?.maxZoomRatio ?: 8.0f
@@ -226,17 +248,17 @@ class CameraController(private val context: Context) {
     }
 
     /**
-     * Captures a sharp ISP-stacked photo at working studio resolution (<= 2560px) and optionally
-     * applies edge-preserving shadow chroma denoising without stale pre-shutter ghosting.
+     * Captures at 100% full sensor resolution (no 2560px downscale) and applies shadow chroma
+     * cleaning safely across strips when needed.
      */
-    suspend fun captureHighResWithBurst(burstCount: Int): Pair<Bitmap, Int> {
+    suspend fun captureFullRes(): RawCaptureOutput {
         val cap = imageCapture ?: error("Câmera ainda não está pronta.")
-        val primaryBmp = suspendCancellableCoroutine<Bitmap> { cont ->
+        return suspendCancellableCoroutine { cont ->
             cap.takePicture(captureExecutor, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     try {
-                        val bmp = decodeCapturedImageProxy(image, maxLongEdge = 2560)
-                        cont.resume(bmp)
+                        val (bmp, jpegBytes) = decodeFullResImageProxy(image)
+                        cont.resume(RawCaptureOutput(fullResBitmap = bmp, exifBytes = jpegBytes, framesDenoised = 1))
                     } catch (err: Throwable) {
                         cont.resumeWithException(err)
                     } finally {
@@ -249,33 +271,52 @@ class CameraController(private val context: Context) {
                 }
             })
         }
+    }
 
-        if (burstCount <= 1) {
-            return primaryBmp to 1
-        }
-
+    /**
+     * Applies edge-preserving shadow chroma cleanup row-by-row when context/mode calls for denoise
+     * without allocating duplicate multi-megabyte full-image arrays.
+     */
+    suspend fun applyFullResDenoiseIfRequested(raw: Bitmap, burstStrength: Int): Pair<Bitmap, Int> {
+        if (burstStrength <= 1) return raw to 1
         return withContext(Dispatchers.Default) {
-            val w = primaryBmp.width
-            val h = primaryBmp.height
-            val px = IntArray(w * h)
-            primaryBmp.getPixels(px, 0, w, 0, 0, w, h)
-            val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(px, w, h)
-            primaryBmp.recycle()
-            Bitmap.createBitmap(cleaned, w, h, Bitmap.Config.ARGB_8888) to burstCount
+            val w = raw.width
+            val h = raw.height
+            if (w * h <= 4_200_000) {
+                val px = IntArray(w * h)
+                raw.getPixels(px, 0, w, 0, 0, w, h)
+                val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(px, w, h)
+                Bitmap.createBitmap(cleaned, w, h, Bitmap.Config.ARGB_8888) to burstStrength
+            } else {
+                // Memory-safe strip denoise for 12MP / 32MP / 50MP photos
+                val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val strip = 512
+                var y0 = 0
+                while (y0 < h) {
+                    val yEnd = minOf(h, y0 + strip)
+                    val readTop = maxOf(0, y0 - 1)
+                    val readBot = minOf(h, yEnd + 1)
+                    val readH = readBot - readTop
+                    val buf = IntArray(w * readH)
+                    raw.getPixels(buf, 0, w, 0, readTop, w, readH)
+                    val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(buf, w, readH)
+                    val skipTop = y0 - readTop
+                    out.setPixels(cleaned, skipTop * w, w, 0, y0, w, yEnd - y0)
+                    y0 += strip
+                }
+                out to burstStrength
+            }
         }
     }
 
-    private fun decodeCapturedImageProxy(image: ImageProxy, maxLongEdge: Int): Bitmap {
+    private fun decodeFullResImageProxy(image: ImageProxy): Pair<Bitmap, ByteArray?> {
         if (image.format == android.graphics.ImageFormat.JPEG) {
             val buffer = image.planes[0].buffer
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
 
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            val sampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxLongEdge)
             val opts = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
+                inSampleSize = 1
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
@@ -286,22 +327,27 @@ class CameraController(private val context: Context) {
                 ?: ExifInterface.ORIENTATION_NORMAL
 
             val oriented = applyExifOrRotation(decoded, exifOrient, image.imageInfo.rotationDegrees)
-            return capLongEdge(oriented, maxLongEdge)
+            return oriented to bytes
         }
         val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(image)
-        return capLongEdge(bmp, maxLongEdge)
+        return bmp to null
     }
 
-    fun decodeGalleryUriOriented(uri: Uri, maxLongEdge: Int = 2560): Bitmap {
+    fun decodeGalleryUriFullRes(uri: Uri): Pair<Bitmap, ByteArray?> {
         val resolver = context.contentResolver
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
             ?: error("Não foi possível abrir a imagem selecionada.")
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val sampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxLongEdge)
+        val maxSafetyEdge = 8200
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSafetyEdge) {
+            sample *= 2
+        }
+
         val opts = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
+            inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
@@ -311,17 +357,19 @@ class CameraController(private val context: Context) {
         val exifOrient = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             ?: ExifInterface.ORIENTATION_NORMAL
 
-        val oriented = applyExifOrRotation(raw, exifOrient, 0)
-        return capLongEdge(oriented, maxLongEdge)
+        return applyExifOrRotation(raw, exifOrient, 0) to bytes
     }
 
-    private fun computeInSampleSize(w: Int, h: Int, targetMax: Int): Int {
-        var sample = 1
-        val longEdge = max(w, h)
-        while (longEdge / (sample * 2) >= targetMax) {
-            sample *= 2
-        }
-        return sample
+    fun createUiPreviewBitmap(src: Bitmap, maxEdge: Int = 1800): Bitmap {
+        val longEdge = max(src.width, src.height)
+        if (longEdge <= maxEdge) return src
+        val scale = maxEdge.toFloat() / longEdge
+        return Bitmap.createScaledBitmap(
+            src,
+            max(16, (src.width * scale).toInt()),
+            max(16, (src.height * scale).toInt()),
+            true
+        )
     }
 
     private fun applyExifOrRotation(bmp: Bitmap, exifOrientation: Int, fallbackRot: Int): Bitmap {
@@ -341,21 +389,7 @@ class CameraController(private val context: Context) {
         return rotated
     }
 
-    private fun capLongEdge(bmp: Bitmap, maxEdge: Int): Bitmap {
-        val longEdge = max(bmp.width, bmp.height)
-        if (longEdge <= maxEdge) return bmp
-        val scale = maxEdge.toFloat() / longEdge
-        val scaled = Bitmap.createScaledBitmap(
-            bmp,
-            max(16, (bmp.width * scale).toInt()),
-            max(16, (bmp.height * scale).toInt()),
-            true
-        )
-        if (scaled !== bmp) bmp.recycle()
-        return scaled
-    }
-
-    suspend fun saveBitmapToGallery(bitmap: Bitmap, conceptTag: String): Uri = withContext(Dispatchers.IO) {
+    suspend fun saveBitmapToGallery(bitmap: Bitmap, sourceExifBytes: ByteArray?, conceptTag: String): Uri = withContext(Dispatchers.IO) {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val filename = "LuminaA55_${stamp}.jpg"
         val values = ContentValues().apply {
@@ -372,9 +406,37 @@ class CameraController(private val context: Context) {
 
         resolver.openOutputStream(uri)?.use { stream ->
             val buf = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 96, buf)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 98, buf)
             stream.write(buf.toByteArray())
         } ?: error("Falha ao gravar JPEG na galeria.")
+
+        // Preserve original camera EXIF metadata cleanly on the upright processed JPEG
+        if (sourceExifBytes != null) {
+            runCatching {
+                val srcExif = ExifInterface(ByteArrayInputStream(sourceExifBytes))
+                resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                    val dstExif = ExifInterface(pfd.fileDescriptor)
+                    val tags = listOf(
+                        ExifInterface.TAG_MAKE,
+                        ExifInterface.TAG_MODEL,
+                        ExifInterface.TAG_DATETIME_ORIGINAL,
+                        ExifInterface.TAG_EXPOSURE_TIME,
+                        ExifInterface.TAG_F_NUMBER,
+                        ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+                        ExifInterface.TAG_FOCAL_LENGTH,
+                        ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+                        ExifInterface.TAG_WHITE_BALANCE,
+                        ExifInterface.TAG_FLASH
+                    )
+                    for (t in tags) {
+                        srcExif.getAttribute(t)?.let { dstExif.setAttribute(t, it) }
+                    }
+                    dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v1.1 ($conceptTag)")
+                    dstExif.saveAttributes()
+                }
+            }
+        }
 
         values.clear()
         values.put(MediaStore.Images.Media.IS_PENDING, 0)
