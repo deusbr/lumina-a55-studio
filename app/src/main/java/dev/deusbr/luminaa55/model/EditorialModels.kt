@@ -89,7 +89,8 @@ data class PhotometricStats(
     val rightLuma: Float,
     val topLuma: Float,
     val centerLuma: Float,
-    val lightDirection: LightDirection
+    val lightDirection: LightDirection,
+    val shadowFloorLuma: Float = 0f
 )
 
 data class StudioLightingHint(
@@ -122,7 +123,8 @@ data class EditRecipe(
     val proMistStrength: Float,
     val grainAmount: Float,
     val vignetteStrength: Float,
-    val monochrome: Boolean
+    val monochrome: Boolean,
+    val dehazeAmount: Float = 0.02f
 )
 
 data class SceneConcept(

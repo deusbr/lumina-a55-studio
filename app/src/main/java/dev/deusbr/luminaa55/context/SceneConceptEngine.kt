@@ -181,7 +181,7 @@ class SceneConceptEngine(private val context: Context) {
         }
 
         val coverage = if (candidateSemantic != null) estimateMaskCoverage(candidateSemantic) else 1.0f
-        val hasMask = candidateSemantic != null && coverage in 0.06f..0.88f
+        val hasMask = candidateSemantic != null && coverage in 0.05f..0.92f
         val finalSemanticMask = if (hasMask && candidateSemantic != null) {
             candidateSemantic
         } else {

@@ -56,7 +56,7 @@ class NeuralStudioEngine(private val context: Context) {
         if (segRaw != null) {
             executed.add("MultiClassSeg")
             fgCoverage = segRaw.fgCoverage
-            hasConfidentSemantic = fgCoverage in 0.06f..0.88f
+            hasConfidentSemantic = fgCoverage in 0.05f..0.92f
             semanticBmp = segRaw.bitmap
         }
 
@@ -68,8 +68,11 @@ class NeuralStudioEngine(private val context: Context) {
             depthBmp = depthRaw
         }
 
-        // 3. Zero-DCE Neural Exposure/Curve Gain Map (full-res safe multiplicative transfer)
-        val gainBmp = runZeroDceGainMap(source, meanLuma, shadowRatio)
+        // 3. Zero-DCE Neural Exposure/Curve Gain Map ONLY in genuinely dark/underexposed scenes
+        val mixStrength = computeZeroDceAdaptiveMix(meanLuma, shadowRatio)
+        val gainBmp = if (mixStrength > 0.02f) {
+            runZeroDceGainMap(source, mixStrength)
+        } else null
         if (gainBmp != null) {
             executed.add("Zero-DCE")
         }
@@ -98,10 +101,11 @@ class NeuralStudioEngine(private val context: Context) {
             if (resized !== source) resized.recycle()
 
             val inBuf = ByteBuffer.allocateDirect(4 * w * h * 3).order(ByteOrder.nativeOrder())
+            // MediaPipe MultiClass Selfie Segmenter expects [-1.0, +1.0] (mean=127.5, std=127.5)
             for (c in pixels) {
-                inBuf.putFloat(((c ushr 16) and 0xFF) / 255f)
-                inBuf.putFloat(((c ushr 8) and 0xFF) / 255f)
-                inBuf.putFloat((c and 0xFF) / 255f)
+                inBuf.putFloat((((c ushr 16) and 0xFF) - 127.5f) / 127.5f)
+                inBuf.putFloat((((c ushr 8) and 0xFF) - 127.5f) / 127.5f)
+                inBuf.putFloat(((c and 0xFF) - 127.5f) / 127.5f)
             }
             inBuf.rewind()
 
@@ -147,10 +151,11 @@ class NeuralStudioEngine(private val context: Context) {
                 val bodySkin = if (channels > 2) probs[2].coerceIn(0f, 1f) else 0f
                 val faceSkin = if (channels > 3) probs[3].coerceIn(0f, 1f) else 0f
                 val clothes = if (channels > 4) probs[4].coerceIn(0f, 1f) else 0f
+                val accessories = if (channels > 5) probs[5].coerceIn(0f, 1f) else 0f
 
                 val fg = (1f - bg).coerceIn(0f, 1f)
                 val skin = (faceSkin + bodySkin).coerceIn(0f, 1f)
-                val detail = (hair + clothes).coerceIn(0f, 1f)
+                val detail = (hair + clothes + accessories).coerceIn(0f, 1f)
 
                 fgArr[i] = fg
                 if (fg > 0.5f) fgPixels++
@@ -211,7 +216,7 @@ class NeuralStudioEngine(private val context: Context) {
         }.getOrNull()
     }
 
-    private fun runZeroDceGainMap(source: Bitmap, meanLuma: Float, shadowRatio: Float): Bitmap? = synchronized(zeroDceLock) {
+    private fun runZeroDceGainMap(source: Bitmap, mixStrength: Float): Bitmap? = synchronized(zeroDceLock) {
         val interp = ensureZeroDce() ?: return null
         return runCatching {
             val w = 512
@@ -222,6 +227,7 @@ class NeuralStudioEngine(private val context: Context) {
             if (resized !== source) resized.recycle()
 
             val inBuf = ByteBuffer.allocateDirect(4 * w * h * 3).order(ByteOrder.nativeOrder())
+            // Zero-DCE expects [0.0, 1.0] RGB input
             for (c in pixels) {
                 inBuf.putFloat(((c ushr 16) and 0xFF) / 255f)
                 inBuf.putFloat(((c ushr 8) and 0xFF) / 255f)
@@ -233,9 +239,6 @@ class NeuralStudioEngine(private val context: Context) {
             interp.run(inBuf, outBuf)
             outBuf.rewind()
             val fb = outBuf.asFloatBuffer()
-
-            // Adaptive blend: strong lift in dim/backlit shots, subtle polish in sunny scenes
-            val mixStrength = computeZeroDceAdaptiveMix(meanLuma, shadowRatio)
 
             val gainPx = IntArray(w * h)
             for (i in 0 until w * h) {
@@ -334,9 +337,9 @@ class NeuralStudioEngine(private val context: Context) {
             val coc = FloatArray(norm.size)
             for (i in norm.indices) {
                 val behind = max(0f, focusDepth - norm[i])
-                val t = ((behind - 0.07f) / 0.42f).coerceIn(0f, 1f)
+                val t = ((behind - 0.04f) / 0.30f).coerceIn(0f, 1f)
                 val smooth = t * t * (3f - 2f * t)
-                val fgGuard = if (fgMask != null && fgMask.size == norm.size && fgMask[i] > 0.55f) 0f else 1f
+                val fgGuard = if (fgMask != null && fgMask.size == norm.size && fgMask[i] > 0.50f) 0f else 1f
                 coc[i] = (smooth * fgGuard).coerceIn(0f, 1f)
             }
             return DepthCocOutput(normalizedDepth = norm, cocBlur = coc, focusDepth = focusDepth)
@@ -344,17 +347,18 @@ class NeuralStudioEngine(private val context: Context) {
 
         fun computeZeroDceAdaptiveMix(meanLuma: Float, shadowRatio: Float): Float {
             return when {
-                meanLuma < 0.26f || shadowRatio > 0.48f -> 0.78f
-                meanLuma < 0.45f || shadowRatio > 0.25f -> 0.52f
-                else -> 0.26f
+                meanLuma < 0.22f -> 0.65f
+                meanLuma < 0.32f && shadowRatio > 0.42f -> 0.38f
+                else -> 0.0f
             }
         }
 
         fun encodeGainChannel(inVal: Float, enhancedVal: Float, mixStrength: Float): Int {
-            val rawGain = enhancedVal / max(0.03f, inVal)
-            val clamped = rawGain.coerceIn(0.75f, 2.25f)
-            val blended = 1f + (clamped - 1f) * mixStrength
-            // Encoded linearly into [0..1] representing gain in [0.5 .. 2.5] -> 0.25 (128) = 1.0x? Wait: (gain - 0.5) / 2.0 -> gain=1.0 -> 0.25, decoded as val*2.0 + 0.5
+            val rawGain = enhancedVal / max(0.04f, inVal)
+            // Protect deep shadows from turning milky gray; cap boost at 1.85x
+            val shadowAnchor = if (inVal < 0.06f) (inVal / 0.06f) else 1.0f
+            val clamped = rawGain.coerceIn(0.85f, 1.85f)
+            val blended = 1f + (clamped - 1f) * mixStrength * shadowAnchor
             val norm = ((blended - 0.5f) / 2.0f).coerceIn(0f, 1f)
             return (norm * 255f).toInt().coerceIn(0, 255)
         }

@@ -192,7 +192,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     previewView = previewView,
                     lens = s.activeLens,
                     captureMode = effectiveMode,
-                    preferAutoExtension = isNormal
+                    preferAutoExtension = false
                 )
             }.onSuccess {
                 _uiState.update { it.copy(hardwareProfile = cameraController.hardwareProfile, statusMessage = null) }

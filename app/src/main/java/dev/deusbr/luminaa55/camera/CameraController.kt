@@ -4,11 +4,15 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Size
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -91,6 +95,9 @@ class CameraController(private val context: Context) {
 
         val baseSelector = buildSelectorForLens(lens, hardwareProfile)
         val finalSelector = resolveExtensionSelector(baseSelector, captureMode, preferAutoExtension, extMgr)
+        val bestNativeSize = if (captureMode == CaptureMode.EDITORIAL_BURST) {
+            findHighestNativeJpegSize(lens, hardwareProfile)
+        } else null
 
         val preview = Preview.Builder()
             .setResolutionSelector(
@@ -101,12 +108,18 @@ class CameraController(private val context: Context) {
             .build()
             .also { it.surfaceProvider = previewView.surfaceProvider }
 
+        val resStrategy = if (bestNativeSize != null) {
+            ResolutionStrategy(bestNativeSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+        } else {
+            ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
+        }
+
         val captureBuilder = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setJpegQuality(100)
             .setResolutionSelector(
                 ResolutionSelector.Builder()
-                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                    .setResolutionStrategy(resStrategy)
                     .build()
             )
 
@@ -167,6 +180,32 @@ class CameraController(private val context: Context) {
         return CameraSelector.DEFAULT_BACK_CAMERA
     }
 
+    private fun findHighestNativeJpegSize(lens: LensOption, profile: CameraHardwareProfile?): Size? {
+        return runCatching {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val targetId = if (lens == LensOption.FRONT_32MP) {
+                manager.cameraIdList.firstOrNull { id ->
+                    manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
+                        CameraCharacteristics.LENS_FACING_FRONT
+                }
+            } else {
+                profile?.lenses?.firstOrNull { it.mappedRole == lens }?.cameraId
+                    ?: manager.cameraIdList.firstOrNull { id ->
+                        manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
+                            CameraCharacteristics.LENS_FACING_BACK
+                    }
+            } ?: return null
+
+            val map = manager.getCameraCharacteristics(targetId)
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+            val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: return null
+            // Target native high-res up to ~33MP (e.g. 32MP IMX616 front / 12.5MP binned IMX906 rear)
+            jpegSizes
+                .filter { it.width * it.height <= 33_500_000 }
+                .maxByOrNull { it.width * it.height }
+        }.getOrNull()
+    }
+
     private fun resolveExtensionSelector(
         base: CameraSelector,
         mode: CaptureMode,
@@ -174,19 +213,18 @@ class CameraController(private val context: Context) {
         extMgr: ExtensionsManager?
     ): CameraSelector {
         if (extMgr == null) return base
+        // Never chain Samsung ExtensionMode.AUTO on EDITORIAL_BURST — it caps resolution & smears detail
         val extMode = when {
-            preferAutoExtension && mode == CaptureMode.EDITORIAL_BURST -> ExtensionMode.AUTO
             mode == CaptureMode.SAMSUNG_HDR -> ExtensionMode.HDR
             mode == CaptureMode.SAMSUNG_NIGHT -> ExtensionMode.NIGHT
             mode == CaptureMode.SAMSUNG_BOKEH -> ExtensionMode.BOKEH
+            preferAutoExtension && mode != CaptureMode.EDITORIAL_BURST -> ExtensionMode.AUTO
             else -> ExtensionMode.NONE
         }
         if (extMode == ExtensionMode.NONE) return base
         return runCatching {
             if (extMgr.isExtensionAvailable(base, extMode)) {
                 extMgr.getExtensionEnabledCameraSelector(base, extMode)
-            } else if (preferAutoExtension && extMgr.isExtensionAvailable(base, ExtensionMode.HDR)) {
-                extMgr.getExtensionEnabledCameraSelector(base, ExtensionMode.HDR)
             } else {
                 base
             }
@@ -410,7 +448,7 @@ class CameraController(private val context: Context) {
                         srcExif.getAttribute(t)?.let { dstExif.setAttribute(t, it) }
                     }
                     dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v2.0 ($conceptTag)")
+                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v2.3 ($conceptTag)")
                     dstExif.saveAttributes()
                 }
             }

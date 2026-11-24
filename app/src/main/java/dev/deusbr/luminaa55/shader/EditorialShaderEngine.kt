@@ -37,7 +37,7 @@ object EditorialShaderEngine {
 
     private const val MAX_SINGLE_PASS_DIM = 4096
     private const val TILE_CORE_SIZE = 2048
-    private const val TILE_PAD = 48
+    private const val TILE_PAD = 64
 
     private val neutralMask1x1 by lazy {
         Bitmap.createBitmap(intArrayOf(Color.argb(255, 255, 0, 0)), 1, 1, Bitmap.Config.ARGB_8888)
@@ -90,6 +90,7 @@ object EditorialShaderEngine {
         uniform float grainAmount;
         uniform float vignetteStrength;
         uniform float monochrome;
+        uniform float dehazeAmount;
 
         float luma(half3 c) {
             return dot(c, half3(0.2126, 0.7152, 0.0722));
@@ -109,11 +110,14 @@ object EditorialShaderEngine {
         float sampleBokehWeight(float2 globalCoord) {
             float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
             float fg = hasSubjectMask > 0.5 ? clamp(float(subjectMask.eval(uv * maskSize).r), 0.0, 1.0) : 1.0;
-            float segBg = hasSubjectMask > 0.5 ? smoothstep(0.18, 0.86, 1.0 - fg) : 0.0;
+            float segBg = hasSubjectMask > 0.5 ? smoothstep(0.16, 0.84, 1.0 - fg) : 0.0;
             if (hasDepthMap > 0.5) {
                 float depthCoc = clamp(float(depthMap.eval(uv * depthSize).g), 0.0, 1.0);
-                // Fuse 3D depth falloff with semantic foreground protection so planes near subject stay razor sharp
-                return hasSubjectMask > 0.5 ? depthCoc * (1.0 - smoothstep(0.45, 0.90, fg)) : depthCoc;
+                if (hasSubjectMask > 0.5) {
+                    float combinedBg = max(depthCoc, segBg * 0.94);
+                    return combinedBg * (1.0 - smoothstep(0.42, 0.88, fg));
+                }
+                return depthCoc;
             }
             return segBg;
         }
@@ -122,6 +126,7 @@ object EditorialShaderEngine {
             float2 globalCoord = fragCoord + tileOrigin;
             float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
             float minDim = min(fullImageSize.x, fullImageSize.y);
+            float2 asp = float2(1.0, fullImageSize.y / max(fullImageSize.x, 1.0));
 
             float4 sem = sampleSemantic(globalCoord);
             float fgMask = hasSubjectMask > 0.5 ? clamp(sem.r, 0.0, 1.0) : 1.0;
@@ -132,68 +137,52 @@ object EditorialShaderEngine {
             half4 baseSample = inputImage.eval(fragCoord);
             half3 rgb = baseSample.rgb;
 
-            // 1. Progressive 3D Optical Bokeh (MiDaS Depth + Semantic Foreground Bleed Guard)
+            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (MiDaS Depth + Semantic Bleed Guard)
             if (backgroundBokeh > 0.01 && bgWeight > 0.02) {
-                float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.013, 6.0, 38.0);
+                float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.022, 10.0, 52.0);
                 half3 acc = rgb;
                 float weightSum = 1.0;
-
-                float2 d0 = float2(0.28, 0.05);
-                float2 d1 = float2(-0.22, 0.36);
-                float2 d2 = float2(-0.35, -0.30);
-                float2 d3 = float2(0.41, -0.35);
-                float2 d4 = float2(0.06, 0.61);
-                float2 d5 = float2(-0.62, 0.18);
-                float2 d6 = float2(0.22, -0.68);
-                float2 d7 = float2(0.66, 0.42);
-                float2 d8 = float2(-0.46, -0.68);
-                float2 d9 = float2(-0.78, -0.20);
-                float2 d10 = float2(0.84, -0.18);
-                float2 d11 = float2(-0.18, 0.92);
-
-                float2 off; float w; float sf;
-                off = d0 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d1 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d2 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d3 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d4 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d5 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d6 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d7 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d8 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d9 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d10 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-                off = d11 * radius; sf = sampleSemantic(globalCoord + off).r; w = 1.0 - smoothstep(0.45, 0.88, sf);
-                acc += inputImage.eval(fragCoord + off).rgb * w; weightSum += w;
-
-                rgb = mix(rgb, acc / max(weightSum, 0.001), bgWeight);
+                float goldenAngle = 2.39996323;
+                for (int i = 1; i <= 24; i++) {
+                    float fi = float(i);
+                    float rFrac = sqrt(fi / 24.0);
+                    float ang = fi * goldenAngle;
+                    float2 off = float2(cos(ang), sin(ang)) * (rFrac * radius);
+                    float sf = hasSubjectMask > 0.5 ? clamp(float(sampleSemantic(globalCoord + off).r), 0.0, 1.0) : 0.0;
+                    float w = 1.0 - smoothstep(0.36, 0.82, sf);
+                    acc += inputImage.eval(fragCoord + off).rgb * w;
+                    weightSum += w;
+                }
+                rgb = mix(rgb, acc / max(weightSum, 0.001), smoothstep(0.02, 0.85, bgWeight));
             }
 
-            // 2. Apply Zero-DCE Neural Exposure/Curve Gain Map cleanly at 100% full resolution
+            // 2. Apply Zero-DCE Neural Gain Map ONLY when genuinely dark scene triggered it
             if (hasNeuralGain > 0.5) {
                 half3 encodedGain = neuralGainMap.eval(uv * gainSize).rgb;
-                half3 gain = clamp(encodedGain * 2.0 + half3(0.5), half3(0.75), half3(2.25));
+                half3 gain = clamp(encodedGain * 2.0 + half3(0.5), half3(0.85), half3(1.85));
                 rgb = clamp(rgb * gain, 0.0, 1.0);
             }
 
             float heuristicSkin = smoothstep(0.05, 0.24, float(rgb.r - rgb.b)) *
                                   smoothstep(0.02, 0.14, float(rgb.r - rgb.g)) *
                                   smoothstep(0.18, 0.85, float(rgb.r));
-            float activeSkin = max(skinMask, heuristicSkin * 0.65);
+            float activeSkin = max(skinMask, heuristicSkin * 0.55);
 
-            // 3. Frequency-Separated Studio Skin Retouch + Hair/Clothes Micro-Acutance
-            float blurFine = clamp(minDim * 0.0022, 1.6, 5.0);
+            // Keep eyes & eyebrows 100% razor sharp (suppress skin smoothing around eye sockets)
+            float eyeKeepSharp = 0.0;
+            if (hasFace > 0.5) {
+                if (leftEye.x > 0.0) {
+                    float dL = length((uv - leftEye) * asp) / max(faceRadius * 0.18, 0.01);
+                    eyeKeepSharp = max(eyeKeepSharp, exp(-dL * dL * 2.5));
+                }
+                if (rightEye.x > 0.0) {
+                    float dR = length((uv - rightEye) * asp) / max(faceRadius * 0.18, 0.01);
+                    eyeKeepSharp = max(eyeKeepSharp, exp(-dR * dR * 2.5));
+                }
+            }
+
+            // 3. Frequency-Separated Studio Skin Polish + Crisp Hair/Eyes/Glasses/Fabric Acutance
+            float blurFine = clamp(minDim * 0.0018, 1.4, 4.0);
             half3 localFine = (
                 inputImage.eval(fragCoord + float2(blurFine, 0.0)).rgb +
                 inputImage.eval(fragCoord - float2(blurFine, 0.0)).rgb +
@@ -201,85 +190,97 @@ object EditorialShaderEngine {
                 inputImage.eval(fragCoord - float2(0.0, blurFine)).rgb
             ) * 0.25;
 
-            if (activeSkin > 0.12) {
-                float blurWide = blurFine * 2.8;
+            if (activeSkin > 0.12 && eyeKeepSharp < 0.75) {
+                float blurWide = blurFine * 2.5;
                 half3 localWide = (
                     inputImage.eval(fragCoord + float2(blurWide, 0.0)).rgb +
                     inputImage.eval(fragCoord - float2(blurWide, 0.0)).rgb +
                     inputImage.eval(fragCoord + float2(0.0, blurWide)).rgb +
                     inputImage.eval(fragCoord - float2(0.0, blurWide)).rgb
                 ) * 0.25;
-                // Keep fine pore detail (rgb - localFine) while smoothing uneven blotches
-                half3 smoothedSkin = clamp(localWide + (rgb - localFine) * 0.88, 0.0, 1.0);
-                rgb = mix(rgb, smoothedSkin, activeSkin * 0.34);
+                half3 smoothedSkin = clamp(localWide + (rgb - localFine) * 0.92, 0.0, 1.0);
+                rgb = mix(rgb, smoothedSkin, activeSkin * 0.22 * (1.0 - eyeKeepSharp));
             }
 
-            // Hair, Eyes & Clothes Texture Acutance (strictly suppresses skin grain)
-            float acutance = (clarity + 0.06 + detailMask * 0.10) * (1.0 - activeSkin * 0.82) * (1.0 - bgWeight * 0.80);
+            // Sharp crisp acutance on eyes, hair, beard, glasses, clothes (never over-sharpening skin pores)
+            float skinDamp = activeSkin * 0.80 * (1.0 - eyeKeepSharp);
+            float acutance = (clarity + 0.08 + detailMask * 0.16 + eyeKeepSharp * 0.14) * (1.0 - skinDamp) * (1.0 - bgWeight * 0.88);
             rgb = clamp(rgb + (rgb - localFine) * acutance, 0.0, 1.0);
 
-            // Specular-only Black Pro-Mist & Halation
-            float mistMask = smoothstep(0.68, 0.99, luma(localFine));
-            rgb = mix(rgb, max(rgb, localFine), mistMask * proMistStrength * 0.32);
+            // Optional Pro-Mist & Halation (zero by default in Studio/Normal mode; active only when requested)
+            if (proMistStrength > 0.01) {
+                float mistMask = smoothstep(0.76, 1.0, luma(localFine));
+                rgb = mix(rgb, max(rgb, localFine), mistMask * proMistStrength * 0.28);
+            }
 
-            float haloSpread = clamp(minDim * 0.005, 4.0, 14.0);
-            half3 haloAvg = (
-                inputImage.eval(fragCoord + float2(haloSpread, haloSpread)).rgb +
-                inputImage.eval(fragCoord + float2(-haloSpread, haloSpread)).rgb +
-                inputImage.eval(fragCoord + float2(haloSpread, -haloSpread)).rgb +
-                inputImage.eval(fragCoord + float2(-haloSpread, -haloSpread)).rgb
-            ) * 0.25;
-            float haloEnergy = smoothstep(0.85, 1.0, luma(haloAvg));
-            rgb += half3(1.0, 0.34, 0.14) * haloEnergy * halationStrength * 0.24 * (1.0 - activeSkin * 0.88);
+            if (halationStrength > 0.01) {
+                float haloSpread = clamp(minDim * 0.005, 4.0, 14.0);
+                half3 haloAvg = (
+                    inputImage.eval(fragCoord + float2(haloSpread, haloSpread)).rgb +
+                    inputImage.eval(fragCoord + float2(-haloSpread, haloSpread)).rgb +
+                    inputImage.eval(fragCoord + float2(haloSpread, -haloSpread)).rgb +
+                    inputImage.eval(fragCoord + float2(-haloSpread, -haloSpread)).rgb
+                ) * 0.25;
+                float haloEnergy = smoothstep(0.88, 1.0, luma(haloAvg));
+                rgb += half3(1.0, 0.34, 0.14) * haloEnergy * halationStrength * 0.22 * (1.0 - activeSkin * 0.90);
+            }
 
-            // 4. Linearize + Sculpted 3D Studio Softbox Key Light & Eye Catchlights
+            // 4. Linearize + Sculpted 3D Studio Softbox Key Light & Crisp Eye Catchlights
             half3 lin = pow(clamp(rgb, 0.0, 1.0), half3(2.2));
 
+            float faceFocus = fgMask;
             float keyBoost = 0.0;
             float eyeSparkle = 0.0;
             if (hasFace > 0.5) {
-                float2 asp = float2(1.0, fullImageSize.y / max(fullImageSize.x, 1.0));
                 float dFace = length((uv - faceCenter) * asp) / max(faceRadius, 0.08);
-                keyBoost = exp(-dFace * dFace * 1.15) * 0.14;
+                float faceSpot = exp(-dFace * dFace * 1.10);
+                keyBoost = faceSpot * 0.15;
+                faceFocus = mix(0.25, 1.0, faceSpot) * fgMask;
                 if (leftEye.x > 0.0) {
-                    float dL = length((uv - leftEye) * asp) / max(faceRadius * 0.11, 0.006);
-                    eyeSparkle += exp(-dL * dL * 2.2) * 0.20;
+                    float dL = length((uv - leftEye) * asp) / max(faceRadius * 0.10, 0.005);
+                    eyeSparkle += exp(-dL * dL * 2.4) * 0.22;
                 }
                 if (rightEye.x > 0.0) {
-                    float dR = length((uv - rightEye) * asp) / max(faceRadius * 0.11, 0.006);
-                    eyeSparkle += exp(-dR * dR * 2.2) * 0.20;
+                    float dR = length((uv - rightEye) * asp) / max(faceRadius * 0.10, 0.005);
+                    eyeSparkle += exp(-dR * dR * 2.4) * 0.22;
                 }
             }
 
-            float relight = 1.0 + (faceRelightGain * fgMask + keyBoost) - backgroundDimming * bgWeight;
+            float relight = 1.0 + (faceRelightGain * faceFocus + keyBoost) - backgroundDimming * bgWeight;
             float skyFactor = smoothstep(0.55, 0.0, uv.y) * (1.0 - fgMask * hasSubjectMask) * smoothstep(0.45, 0.92, luma(rgb));
             float skyGain = 1.0 - skyRecovery * skyFactor * 0.36;
-            lin *= exp2(exposureOffset) * clamp(relight, 0.78, 1.42) * skyGain * (1.0 + eyeSparkle);
+            lin *= exp2(exposureOffset) * clamp(relight, 0.68, 1.42) * skyGain * (1.0 + eyeSparkle);
 
             float wbDamp = mix(1.0, 1.0 - skinProtection * 0.55, activeSkin);
             lin.r *= 1.0 + warmth * 0.30 * wbDamp;
             lin.b *= 1.0 - warmth * 0.28 * wbDamp;
             lin.g *= 1.0 + tint * 0.16 * wbDamp;
 
-            // Filmic Toe & Silky Highlight Shoulder (never crushes midtones)
+            // Black-Anchored Mid-Shadow Lift (never lifts true 0,0,0 black into milky gray!)
             float lumLin = luma(lin);
-            lin += half3(shadowLift * 0.038 * (1.0 - smoothstep(0.0, 0.22, lumLin)));
-            float over = max(0.0, lumLin - 0.52);
+            float midShadowBand = smoothstep(0.015, 0.075, lumLin) * (1.0 - smoothstep(0.10, 0.32, lumLin));
+            lin *= 1.0 + shadowLift * 0.55 * midShadowBand;
+
+            float over = max(0.0, lumLin - 0.54);
             float shoulder = 1.0 / (1.0 + over * highlightRollOff * 0.95);
-            lin *= mix(1.0, shoulder, smoothstep(0.48, 1.15, lumLin));
+            lin *= mix(1.0, shoulder, smoothstep(0.50, 1.15, lumLin));
 
-            // 5. Studio Print Grading in sRGB Space
+            // 5. Studio Print Grading in sRGB Space + Adaptive Veiling-Glare Dehaze
             half3 srgb = pow(clamp(lin, 0.0, 1.0), half3(1.0 / 2.2));
-            srgb = clamp((srgb - 0.48) * contrast + 0.48, 0.0, 1.0);
+            if (dehazeAmount > 0.002) {
+                float dh = clamp(dehazeAmount, 0.0, 0.12);
+                srgb = clamp((srgb - half3(dh)) / max(0.85, 1.0 - dh), 0.0, 1.0);
+            }
+            srgb = clamp((srgb - 0.50) * contrast + 0.50, 0.0, 1.0);
 
-            // Subtle Split-Tone (warm silky highlights + crisp studio shadows)
+            // Subtle Split-Tone (clean neutral highlights + crisp studio shadows)
             float lumOut = luma(srgb);
             if (monochrome > 0.5) {
                 float bw = clamp(dot(srgb, half3(0.30, 0.56, 0.14)), 0.0, 1.0);
                 srgb = half3(bw, bw * 0.995, bw * 0.985);
             } else {
-                half3 coolShadow = half3(-0.012, 0.0, 0.014) * (1.0 - smoothstep(0.0, 0.32, lumOut)) * (1.0 - activeSkin);
-                half3 warmHigh = half3(0.015, 0.008, -0.010) * smoothstep(0.55, 0.95, lumOut);
+                half3 coolShadow = half3(-0.008, 0.0, 0.012) * (1.0 - smoothstep(0.0, 0.30, lumOut)) * (1.0 - activeSkin);
+                half3 warmHigh = half3(0.006, 0.002, -0.004) * smoothstep(0.58, 0.95, lumOut);
                 srgb = clamp(srgb + coolShadow + warmHigh, 0.0, 1.0);
                 float satEffective = mix(saturation, mix(1.0, saturation, 0.45), activeSkin * skinProtection);
                 srgb = clamp(mix(half3(lumOut), srgb, satEffective), 0.0, 1.0);
@@ -371,7 +372,8 @@ object EditorialShaderEngine {
             halationStrength = r.halationStrength * t,
             proMistStrength = r.proMistStrength * t,
             grainAmount = r.grainAmount * t,
-            vignetteStrength = r.vignetteStrength * t
+            vignetteStrength = r.vignetteStrength * t,
+            dehazeAmount = r.dehazeAmount * t
         )
     }
 
@@ -494,6 +496,7 @@ object EditorialShaderEngine {
         shader.setFloatUniform("grainAmount", recipe.grainAmount)
         shader.setFloatUniform("vignetteStrength", recipe.vignetteStrength)
         shader.setFloatUniform("monochrome", if (recipe.monochrome) 1.0f else 0.0f)
+        shader.setFloatUniform("dehazeAmount", recipe.dehazeAmount)
 
         val reader = ImageReader.newInstance(
             w, h, PixelFormat.RGBA_8888, 1,
@@ -671,7 +674,7 @@ object EditorialShaderEngine {
 
         val expMul = 2.0.pow(recipe.exposureOffset.toDouble()).toFloat()
         val relight = (1f + recipe.faceRelightGain * (if (hasConfidentMask) mask else 0f) - recipe.backgroundDimming * bgWeight)
-            .coerceIn(0.78f, 1.38f)
+            .coerceIn(0.68f, 1.38f)
 
         var lr = r.coerceIn(0f, 1f).pow(2.2f) * expMul * relight
         var lg = g.coerceIn(0f, 1f).pow(2.2f) * expMul * relight
@@ -683,12 +686,13 @@ object EditorialShaderEngine {
         lg *= (1f + recipe.tint * 0.16f * wbDamp)
 
         val lumLin = 0.2126f * lr + 0.7152f * lg + 0.0722f * lb
-        val lift = recipe.shadowLift * 0.038f * (1f - smoothstep(0f, 0.22f, lumLin))
-        lr += lift; lg += lift; lb += lift
+        val midShadowBand = smoothstep(0.015f, 0.075f, lumLin) * (1f - smoothstep(0.10f, 0.32f, lumLin))
+        val liftMul = 1f + recipe.shadowLift * 0.55f * midShadowBand
+        lr *= liftMul; lg *= liftMul; lb *= liftMul
 
-        val over = max(0f, lumLin - 0.52f)
+        val over = max(0f, lumLin - 0.54f)
         val shoulder = 1f / (1f + over * recipe.highlightRollOff * 0.95f)
-        val shoulderMix = smoothstep(0.48f, 1.15f, lumLin)
+        val shoulderMix = smoothstep(0.50f, 1.15f, lumLin)
         val rollScale = (1f - shoulderMix) + shoulder * shoulderMix
         lr *= rollScale; lg *= rollScale; lb *= rollScale
 
@@ -696,9 +700,16 @@ object EditorialShaderEngine {
         var sg = lg.coerceIn(0f, 1f).pow(1f / 2.2f)
         var sb = lb.coerceIn(0f, 1f).pow(1f / 2.2f)
 
-        sr = ((sr - 0.48f) * recipe.contrast + 0.48f).coerceIn(0f, 1f)
-        sg = ((sg - 0.48f) * recipe.contrast + 0.48f).coerceIn(0f, 1f)
-        sb = ((sb - 0.48f) * recipe.contrast + 0.48f).coerceIn(0f, 1f)
+        if (recipe.dehazeAmount > 0.002f) {
+            val dh = recipe.dehazeAmount.coerceIn(0f, 0.12f)
+            val denom = max(0.85f, 1f - dh)
+            sr = ((sr - dh) / denom).coerceIn(0f, 1f)
+            sg = ((sg - dh) / denom).coerceIn(0f, 1f)
+            sb = ((sb - dh) / denom).coerceIn(0f, 1f)
+        }
+        sr = ((sr - 0.50f) * recipe.contrast + 0.50f).coerceIn(0f, 1f)
+        sg = ((sg - 0.50f) * recipe.contrast + 0.50f).coerceIn(0f, 1f)
+        sb = ((sb - 0.50f) * recipe.contrast + 0.50f).coerceIn(0f, 1f)
 
         val lumOut = 0.2126f * sr + 0.7152f * sg + 0.0722f * sb
         if (recipe.monochrome) {

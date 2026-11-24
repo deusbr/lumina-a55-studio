@@ -177,7 +177,37 @@ class PhotometricAndBurstTest {
         // gain=1.0 -> (1.0 - 0.5) / 2.0 = 0.25 -> ~63..64
         assertTrue("Neutral gain byte expected near 63..64, got $neutralByte", neutralByte in 62..65)
 
-        val liftedByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.15f, enhancedVal = 0.30f, mixStrength = 0.78f)
-        assertTrue("Low-light lifted gain byte ($liftedByte) must exceed neutral ($neutralByte)", liftedByte > neutralByte + 30)
+        val liftedByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.15f, enhancedVal = 0.30f, mixStrength = 0.65f)
+        assertTrue("Low-light lifted gain byte ($liftedByte) must exceed neutral ($neutralByte)", liftedByte > neutralByte + 25)
+
+        // Indoor / bright scenes must NOT invoke Zero-DCE milky shadow wash
+        assertEquals(0f, NeuralStudioEngine.computeZeroDceAdaptiveMix(meanLuma = 0.49f, shadowRatio = 0.18f), 0.0001f)
+        assertTrue(NeuralStudioEngine.computeZeroDceAdaptiveMix(meanLuma = 0.16f, shadowRatio = 0.60f) > 0.5f)
+    }
+
+    @Test
+    fun pureBlackRemainsAnchoredAndCloseSelfieKeepsStudioBokeh() {
+        val px = solidFrame(32, 32, 128, 128, 128)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
+        val closeSelfieConcept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person", "Selfie"),
+            faceCount = 1,
+            subjectRatio = 0.80f,
+            userSelectedStock = FilmStock.AUTO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        assertTrue("Close selfie (80% frame) must keep studio bokeh active", closeSelfieConcept.recipe.backgroundBokeh >= 0.60f)
+        assertTrue("Close selfie must separate background dimming", closeSelfieConcept.recipe.backgroundDimming >= 0.15f)
+        assertEquals("Clean studio default should not add milky Pro-Mist haze", 0f, closeSelfieConcept.recipe.proMistStrength, 0.001f)
+
+        val blackPixel = EditorialShaderEngine.applyEditorialToneToPixel(
+            r = 0f, g = 0f, b = 0f,
+            nx = 0f, ny = 0f, x = 4, y = 4,
+            mask = 1f, hasConfidentMask = true,
+            recipe = closeSelfieConcept.recipe.copy(shadowLift = 0.25f, grainAmount = 0f, vignetteStrength = 0f)
+        )
+        val blackR = (blackPixel ushr 16) and 0xFF
+        assertTrue("Pure black must stay deep black (<= 2), got $blackR", blackR <= 2)
     }
 }
