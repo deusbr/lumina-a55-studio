@@ -18,11 +18,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -39,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -70,6 +74,8 @@ fun ReviewStudioScreen(
     state: LuminaUiState,
     viewModel: LuminaViewModel
 ) {
+    // viewMode: 0 = Dividido (Antes/Depois), 1 = Só Ensaio, 2 = Só Original
+    var viewMode by remember { mutableIntStateOf(0) }
     var splitRatio by remember { mutableFloatStateOf(0.55f) }
     var proMist by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.proMistStrength) }
     var bokeh by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.backgroundBokeh) }
@@ -127,7 +133,7 @@ fun ReviewStudioScreen(
             }
         }
 
-        // Split Before / After Preview
+        // Split Before / After Preview with exact 1:1 requiredWidth alignment
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
@@ -135,74 +141,111 @@ fun ReviewStudioScreen(
                 .padding(horizontal = 14.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .background(Color.Black)
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures { change, _ ->
-                        change.consume()
-                        splitRatio = (change.position.x / size.width).coerceIn(0.05f, 0.95f)
+                .pointerInput(viewMode) {
+                    if (viewMode == 0) {
+                        detectHorizontalDragGestures { change, _ ->
+                            change.consume()
+                            splitRatio = (change.position.x / size.width).coerceIn(0.05f, 0.95f)
+                        }
                     }
                 }
         ) {
             val fullWidth = maxWidth
+            val activeSplit = when (viewMode) {
+                1 -> 1.0f
+                2 -> 0.0f
+                else -> splitRatio
+            }
             Image(
                 bitmap = beforeImg,
                 contentDescription = "Original",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(fullWidth * splitRatio)
-                    .clip(RectangleShape)
-                    .clipToBounds()
-            ) {
-                Image(
-                    bitmap = afterImg,
-                    contentDescription = "Ensaio Processado",
-                    contentScale = ContentScale.Fit,
+            if (activeSplit > 0f) {
+                Box(
                     modifier = Modifier
                         .fillMaxHeight()
-                        .width(fullWidth)
-                )
+                        .width(fullWidth * activeSplit)
+                        .clip(RectangleShape)
+                        .clipToBounds()
+                ) {
+                    Image(
+                        bitmap = afterImg,
+                        contentDescription = "Ensaio Processado",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .wrapContentWidth(align = Alignment.Start, unbounded = true)
+                            .width(fullWidth)
+                    )
+                }
             }
 
-            // Divider line
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .padding(start = fullWidth * splitRatio)
-                    .width(2.dp)
-                    .background(Brass)
-            )
+            if (viewMode == 0) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .offset(x = fullWidth * splitRatio)
+                        .width(2.dp)
+                        .background(Brass)
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = fullWidth * splitRatio - 13.dp)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Brass),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("↔", color = StudioBg, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+            }
 
+            // View Mode Switcher + Badges
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
                     .padding(10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "ENSAIO (${session.concept.recommendedStock.badge})",
-                    color = StudioBg,
+                    if (viewMode == 2) "ORIGINAL" else "ENSAIO (${session.concept.recommendedStock.badge})",
+                    color = if (viewMode == 2) Ivory else StudioBg,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 10.sp,
                     modifier = Modifier
                         .clip(RoundedCornerShape(999.dp))
-                        .background(Brass)
+                        .background(if (viewMode == 2) Color.Black.copy(alpha = 0.72f) else Brass)
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
-                Text(
-                    "ORIGINAL",
-                    color = Ivory,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(999.dp))
-                        .background(Color.Black.copy(alpha = 0.65f))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+                        .background(Color.Black.copy(alpha = 0.72f))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    listOf(0 to "Dividido", 1 to "Ensaio", 2 to "Original").forEach { (idx, label) ->
+                        val active = viewMode == idx
+                        Text(
+                            text = label,
+                            color = if (active) StudioBg else Ivory,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (active) Brass else Color.Transparent)
+                                .clickable { viewMode = idx }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
             }
         }
 

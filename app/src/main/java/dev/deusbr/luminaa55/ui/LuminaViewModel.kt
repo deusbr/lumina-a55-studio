@@ -1,14 +1,13 @@
 package dev.deusbr.luminaa55.ui
 
 import android.app.Application
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
 import dev.deusbr.luminaa55.camera.CameraController
+import dev.deusbr.luminaa55.context.PhotometricAnalyzer
 import dev.deusbr.luminaa55.context.SceneConceptEngine
 import dev.deusbr.luminaa55.model.CameraHardwareProfile
 import dev.deusbr.luminaa55.model.CaptureMode
@@ -17,6 +16,7 @@ import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.LensOption
 import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,9 +48,14 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     val cameraController = CameraController(app)
     private val conceptEngine = SceneConceptEngine()
+    private var reprocessJob: Job? = null
 
     private val _uiState = MutableStateFlow(LuminaUiState())
     val uiState: StateFlow<LuminaUiState> = _uiState.asStateFlow()
+
+    init {
+        conceptEngine.warmUp(app)
+    }
 
     fun bindCamera(owner: LifecycleOwner, previewView: PreviewView) {
         viewModelScope.launch {
@@ -91,8 +96,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectFilmStock(stock: FilmStock) {
         _uiState.update { it.copy(selectedStock = stock) }
-        val session = _uiState.value.activeSession ?: return
-        reprocessActiveSession(stock, _uiState.value.editIntensity)
+        if (_uiState.value.activeSession != null) {
+            reprocessActiveSession(stock, _uiState.value.editIntensity)
+        }
     }
 
     fun setBurstCount(count: Int) {
@@ -136,7 +142,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                         source = capturedBmp,
                         subjectMask = analysis.subjectMask,
                         recipe = analysis.concept.recipe,
-                        intensity = 1.0f
+                        intensity = 1.0f,
+                        hasConfidentMask = analysis.hasConfidentMask
                     )
                 }
                 CapturedPhotoSession(
@@ -147,7 +154,11 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     burstFramesMerged = mergedCount,
                     gpuAccelerated = rendered.gpuAccelerated,
                     processingTimeMs = System.currentTimeMillis() - startMs,
-                    lensUsed = _uiState.value.activeLens
+                    lensUsed = _uiState.value.activeLens,
+                    cachedStats = analysis.stats,
+                    cachedLabels = analysis.labels,
+                    cachedFaceCount = analysis.faceCount,
+                    hasConfidentMask = analysis.hasConfidentMask
                 )
             }.onSuccess { session ->
                 _uiState.update {
@@ -169,15 +180,18 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             _uiState.update { it.copy(isCapturing = true, statusMessage = "Lendo imagem & aplicando ensaio…") }
             val startMs = System.currentTimeMillis()
             runCatching {
-                val bmp = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
-                        BitmapFactory.decodeStream(stream)
-                    } ?: error("Não foi possível abrir a imagem.")
+                val scaled = withContext(Dispatchers.IO) {
+                    cameraController.decodeGalleryUriOriented(uri, maxLongEdge = 2560)
                 }
-                val scaled = scaleForProcessing(bmp, 2048)
                 val analysis = conceptEngine.analyze(scaled, _uiState.value.selectedStock)
                 val rendered = withContext(Dispatchers.Default) {
-                    EditorialShaderEngine.renderEditorial(scaled, analysis.subjectMask, analysis.concept.recipe, 1.0f)
+                    EditorialShaderEngine.renderEditorial(
+                        source = scaled,
+                        subjectMask = analysis.subjectMask,
+                        recipe = analysis.concept.recipe,
+                        intensity = 1.0f,
+                        hasConfidentMask = analysis.hasConfidentMask
+                    )
                 }
                 CapturedPhotoSession(
                     originalBitmap = scaled,
@@ -187,7 +201,11 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     burstFramesMerged = 1,
                     gpuAccelerated = rendered.gpuAccelerated,
                     processingTimeMs = System.currentTimeMillis() - startMs,
-                    lensUsed = _uiState.value.activeLens
+                    lensUsed = _uiState.value.activeLens,
+                    cachedStats = analysis.stats,
+                    cachedLabels = analysis.labels,
+                    cachedFaceCount = analysis.faceCount,
+                    hasConfidentMask = analysis.hasConfidentMask
                 )
             }.onSuccess { session ->
                 _uiState.update { it.copy(isCapturing = false, activeSession = session, editIntensity = 1.0f, statusMessage = null) }
@@ -206,22 +224,49 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         val session = _uiState.value.activeSession ?: return
         _uiState.update { it.copy(selectedStock = stock, editIntensity = intensity) }
-        viewModelScope.launch {
+
+        reprocessJob?.cancel()
+        reprocessJob = viewModelScope.launch {
             val startMs = System.currentTimeMillis()
-            val updatedAnalysis = conceptEngine.analyze(session.originalBitmap, stock)
-            val tunedRecipe = updatedAnalysis.concept.recipe.copy(
-                proMistStrength = customProMist ?: updatedAnalysis.concept.recipe.proMistStrength,
-                backgroundBokeh = customBokeh ?: updatedAnalysis.concept.recipe.backgroundBokeh,
-                grainAmount = customGrain ?: updatedAnalysis.concept.recipe.grainAmount
-            )
-            val rendered = withContext(Dispatchers.Default) {
-                EditorialShaderEngine.renderEditorial(session.originalBitmap, updatedAnalysis.subjectMask, tunedRecipe, intensity)
+            val stats = session.cachedStats
+            val mask = session.subjectMaskBitmap
+            val updatedConcept = if (stats != null && mask != null) {
+                PhotometricAnalyzer.buildConceptProfile(
+                    stats = stats,
+                    labels = session.cachedLabels,
+                    faceCount = session.cachedFaceCount,
+                    subjectRatio = session.concept.subjectRatio,
+                    userSelectedStock = stock,
+                    hasConfidentMask = session.hasConfidentMask
+                )
+            } else {
+                conceptEngine.analyze(session.originalBitmap, stock).concept
             }
-            _uiState.update {
-                it.copy(
-                    activeSession = session.copy(
+
+            val baseRecipe = updatedConcept.recipe
+            val tunedRecipe = baseRecipe.copy(
+                proMistStrength = customProMist ?: baseRecipe.proMistStrength,
+                backgroundBokeh = customBokeh ?: baseRecipe.backgroundBokeh,
+                grainAmount = customGrain ?: baseRecipe.grainAmount
+            )
+            val maskForRender = mask ?: return@launch
+            val allowMask = session.hasConfidentMask || (customBokeh != null && customBokeh > 0.01f && mask.width > 16)
+
+            val rendered = withContext(Dispatchers.Default) {
+                EditorialShaderEngine.renderEditorial(
+                    source = session.originalBitmap,
+                    subjectMask = maskForRender,
+                    recipe = tunedRecipe,
+                    intensity = intensity,
+                    hasConfidentMask = allowMask
+                )
+            }
+            _uiState.update { cur ->
+                val curSession = cur.activeSession ?: return@update cur
+                cur.copy(
+                    activeSession = curSession.copy(
                         processedBitmap = rendered.bitmap,
-                        concept = updatedAnalysis.concept.copy(recipe = tunedRecipe),
+                        concept = updatedConcept.copy(recipe = tunedRecipe),
                         gpuAccelerated = rendered.gpuAccelerated,
                         processingTimeMs = System.currentTimeMillis() - startMs,
                         savedUriString = null
@@ -251,17 +296,12 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeReviewStudio() {
+        reprocessJob?.cancel()
         _uiState.update { it.copy(activeSession = null, statusMessage = null) }
     }
 
     fun clearStatus() {
         _uiState.update { it.copy(statusMessage = null) }
-    }
-
-    private fun scaleForProcessing(src: Bitmap, maxDim: Int): Bitmap {
-        val scale = maxDim.toFloat() / maxOf(src.width, src.height)
-        if (scale >= 1f) return src
-        return Bitmap.createScaledBitmap(src, (src.width * scale).toInt(), (src.height * scale).toInt(), true)
     }
 
     override fun onCleared() {

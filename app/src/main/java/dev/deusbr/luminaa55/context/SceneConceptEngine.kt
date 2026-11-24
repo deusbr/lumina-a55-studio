@@ -1,31 +1,37 @@
 package dev.deusbr.luminaa55.context
 
+import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RadialGradient
-import android.graphics.RectF
-import android.graphics.Shader
+import com.google.android.gms.common.moduleinstall.ModuleInstall
+import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.label.ImageLabeling
 import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
+import com.google.mlkit.vision.segmentation.Segmentation
+import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import dev.deusbr.luminaa55.model.FilmStock
+import dev.deusbr.luminaa55.model.PhotometricStats
 import dev.deusbr.luminaa55.model.SceneConcept
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.FloatBuffer
 import kotlin.math.max
 
 data class ConceptAnalysisOutput(
     val concept: SceneConcept,
-    val subjectMask: Bitmap
+    val subjectMask: Bitmap,
+    val hasConfidentMask: Boolean,
+    val stats: PhotometricStats,
+    val labels: List<String>,
+    val faceCount: Int
 )
 
 class SceneConceptEngine {
@@ -55,6 +61,28 @@ class SceneConceptEngine {
         )
     }
 
+    // Bundled 100% offline portrait/person segmenter (works immediately without waiting for Play Services download)
+    private val selfieSegmenter by lazy {
+        Segmentation.getClient(
+            SelfieSegmenterOptions.Builder()
+                .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
+                .build()
+        )
+    }
+
+    /**
+     * Proactively requests Play Services Subject Segmentation model install in the background.
+     */
+    fun warmUp(context: Context) {
+        runCatching {
+            val installClient = ModuleInstall.getClient(context)
+            val request = ModuleInstallRequest.newBuilder()
+                .addApi(subjectSegmenter)
+                .build()
+            installClient.installModules(request)
+        }
+    }
+
     suspend fun analyze(
         bitmap: Bitmap,
         selectedStock: FilmStock = FilmStock.AUTO_EDITORIAL
@@ -72,17 +100,24 @@ class SceneConceptEngine {
                     .map { it.text }
             }.getOrDefault(emptyList())
         }
-        val segMaskDeferred = async {
+        val subjectSegDeferred = async {
             runCatching {
                 val res = subjectSegmenter.process(inputImage).await()
                 val mask = res.foregroundConfidenceMask ?: return@runCatching null
-                confidenceMaskToBitmap(mask, analysisBmp.width, analysisBmp.height)
+                floatBufferMaskToBitmap(mask, analysisBmp.width, analysisBmp.height)
+            }.getOrNull()
+        }
+        val selfieSegDeferred = async {
+            runCatching {
+                val res = selfieSegmenter.process(inputImage).await()
+                selfieMaskToBitmap(res.buffer, res.width, res.height, analysisBmp.width, analysisBmp.height)
             }.getOrNull()
         }
 
         val faces = facesDeferred.await()
         val labels = labelsDeferred.await()
-        val rawSubjectMask = segMaskDeferred.await()
+        val subjectSegBmp = subjectSegDeferred.await()
+        val selfieSegBmp = if (subjectSegBmp == null) selfieSegDeferred.await() else null
 
         val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
         val faceCx = primaryFace?.let { it.boundingBox.exactCenterX() / analysisBmp.width }
@@ -92,18 +127,40 @@ class SceneConceptEngine {
         analysisBmp.getPixels(pixels, 0, analysisBmp.width, 0, 0, analysisBmp.width, analysisBmp.height)
         val photoStats = PhotometricAnalyzer.analyzeArgbPixels(pixels, analysisBmp.width, analysisBmp.height, faceCx, faceCy)
 
-        val finalMask = rawSubjectMask ?: buildFallbackSubjectMask(analysisBmp.width, analysisBmp.height, faces)
-        val subjectRatio = estimateMaskCoverage(finalMask)
+        // Choose real confident foreground mask (1.0 = foreground subject, 0.0 = background)
+        val candidateMask = subjectSegBmp ?: selfieSegBmp
+        val candidateCoverage = candidateMask?.let { estimateMaskCoverage(it) } ?: 0f
+        val hasRealMask = candidateMask != null && candidateCoverage in 0.06f..0.86f
 
+        val finalMask = if (hasRealMask && candidateMask != null) {
+            smoothMaskEdges(candidateMask)
+        } else {
+            // Neutral all-foreground mask: never apply blind radial blur onto unsegmented foreground objects
+            buildNeutralForegroundMask(16, 16)
+        }
+
+        if (subjectSegBmp != null && subjectSegBmp !== candidateMask) subjectSegBmp.recycle()
+        if (selfieSegBmp != null && selfieSegBmp !== candidateMask) selfieSegBmp.recycle()
+        if (analysisBmp !== bitmap) analysisBmp.recycle()
+
+        val subjectRatio = if (hasRealMask) candidateCoverage else 1.0f
         val concept = PhotometricAnalyzer.buildConceptProfile(
             stats = photoStats,
             labels = labels,
             faceCount = faces.size,
             subjectRatio = subjectRatio,
-            userSelectedStock = selectedStock
+            userSelectedStock = selectedStock,
+            hasConfidentMask = hasRealMask
         )
 
-        ConceptAnalysisOutput(concept = concept, subjectMask = finalMask)
+        ConceptAnalysisOutput(
+            concept = concept,
+            subjectMask = finalMask,
+            hasConfidentMask = hasRealMask,
+            stats = photoStats,
+            labels = labels,
+            faceCount = faces.size
+        )
     }
 
     /**
@@ -127,16 +184,19 @@ class SceneConceptEngine {
             face?.let { it.boundingBox.exactCenterX() / small.width },
             face?.let { it.boundingBox.exactCenterY() / small.height }
         )
+        if (small !== bitmap) small.recycle()
+
         val concept = PhotometricAnalyzer.buildConceptProfile(
             stats = stats,
             labels = labels,
             faceCount = faces.size,
-            subjectRatio = if (faces.isNotEmpty()) 0.32f else 0.0f
+            subjectRatio = if (faces.isNotEmpty()) 0.32f else 0.0f,
+            hasConfidentMask = faces.isNotEmpty()
         )
         "${concept.conceptTitle} · ${concept.recommendedStock.badge}"
     }
 
-    private fun confidenceMaskToBitmap(buffer: java.nio.FloatBuffer, w: Int, h: Int): Bitmap {
+    private fun floatBufferMaskToBitmap(buffer: FloatBuffer, w: Int, h: Int): Bitmap {
         buffer.rewind()
         val out = IntArray(w * h)
         for (i in 0 until w * h) {
@@ -147,41 +207,55 @@ class SceneConceptEngine {
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    private fun buildFallbackSubjectMask(w: Int, h: Int, faces: List<Face>): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(Color.BLACK)
-
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        if (faces.isNotEmpty()) {
-            for (face in faces) {
-                val box = face.boundingBox
-                val cx = box.exactCenterX()
-                val cy = (box.exactCenterY() + box.height() * 0.65f).coerceIn(0f, h.toFloat())
-                val radius = max(box.width(), box.height()) * 2.2f
-                paint.shader = RadialGradient(
-                    cx, cy, max(20f, radius),
-                    intArrayOf(Color.WHITE, Color.argb(255, 220, 220, 220), Color.BLACK),
-                    floatArrayOf(0f, 0.55f, 1f),
-                    Shader.TileMode.CLAMP
-                )
-                canvas.drawOval(
-                    RectF(cx - radius * 0.85f, cy - radius * 1.1f, cx + radius * 0.85f, cy + radius * 1.2f),
-                    paint
-                )
-            }
-        } else {
-            // Soft center-weighted editorial subject priority when no person/Play Services segmenter is active
-            val radius = max(w, h) * 0.52f
-            paint.shader = RadialGradient(
-                w * 0.5f, h * 0.5f, radius,
-                intArrayOf(Color.WHITE, Color.argb(255, 160, 160, 160), Color.BLACK),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
-            )
-            canvas.drawCircle(w * 0.5f, h * 0.5f, radius, paint)
+    private fun selfieMaskToBitmap(buffer: ByteBuffer, mw: Int, mh: Int, targetW: Int, targetH: Int): Bitmap {
+        buffer.rewind()
+        val fb = buffer.asFloatBuffer()
+        val out = IntArray(mw * mh)
+        for (i in 0 until mw * mh) {
+            val conf = if (fb.hasRemaining()) fb.get().coerceIn(0f, 1f) else 0f
+            val g = (conf * 255f).toInt()
+            out[i] = Color.argb(255, g, g, g)
         }
-        return bmp
+        val raw = Bitmap.createBitmap(out, mw, mh, Bitmap.Config.ARGB_8888)
+        if (mw == targetW && mh == targetH) return raw
+        val scaled = Bitmap.createScaledBitmap(raw, targetW, targetH, true)
+        raw.recycle()
+        return scaled
+    }
+
+    /**
+     * Gentle 3x3 edge feathering so subject-vs-background transitions never halo or cut abruptly.
+     */
+    private fun smoothMaskEdges(mask: Bitmap): Bitmap {
+        val w = mask.width
+        val h = mask.height
+        val src = IntArray(w * h)
+        mask.getPixels(src, 0, w, 0, 0, w, h)
+        mask.recycle()
+        val dst = IntArray(w * h)
+        for (y in 0 until h) {
+            val y0 = maxOf(0, y - 1)
+            val y1 = minOf(h - 1, y + 1)
+            for (x in 0 until w) {
+                val x0 = maxOf(0, x - 1)
+                val x1 = minOf(w - 1, x + 1)
+                var sum = 0
+                for (yy in y0..y1) {
+                    val row = yy * w
+                    for (xx in x0..x1) {
+                        sum += (src[row + xx] ushr 16) and 0xFF
+                    }
+                }
+                val v = (sum / 9).coerceIn(0, 255)
+                dst[y * w + x] = Color.argb(255, v, v, v)
+            }
+        }
+        return Bitmap.createBitmap(dst, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun buildNeutralForegroundMask(w: Int, h: Int): Bitmap {
+        val out = IntArray(w * h) { Color.WHITE }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
     private fun estimateMaskCoverage(mask: Bitmap): Float {
@@ -189,7 +263,7 @@ class SceneConceptEngine {
         mask.getPixels(pixels, 0, mask.width, 0, 0, mask.width, mask.height)
         var fg = 0
         for (p in pixels) {
-            if (((p ushr 16) and 0xFF) > 120) fg++
+            if (((p ushr 16) and 0xFF) > 128) fg++
         }
         return fg.toFloat() / max(1, pixels.size)
     }
@@ -209,5 +283,6 @@ class SceneConceptEngine {
         runCatching { faceDetector.close() }
         runCatching { imageLabeler.close() }
         runCatching { subjectSegmenter.close() }
+        runCatching { selfieSegmenter.close() }
     }
 }

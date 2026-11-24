@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Environment
@@ -30,6 +29,7 @@ import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import dev.deusbr.luminaa55.hardware.A55CameraInspector
 import dev.deusbr.luminaa55.model.CameraHardwareProfile
@@ -38,14 +38,15 @@ import dev.deusbr.luminaa55.model.LensOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
-import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.max
 
 class CameraController(private val context: Context) {
 
@@ -55,13 +56,14 @@ class CameraController(private val context: Context) {
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
 
-    private val cameraExecutor = Executors.newSingleThreadExecutor()
-    private val burstRingBuffer = ArrayDeque<Bitmap>(6)
-    private val ringLock = Any()
+    // Dedicated executors prevent live preview hints from blocking shutter capture
+    private val captureExecutor = Executors.newSingleThreadExecutor()
+    private val analysisExecutor = Executors.newSingleThreadExecutor()
 
     var hardwareProfile: CameraHardwareProfile? = null
         private set
 
+    @Volatile
     private var lastHintTimestampMs = 0L
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -104,22 +106,14 @@ class CameraController(private val context: Context) {
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
 
-        analysis.setAnalyzer(cameraExecutor) { proxy ->
+        analysis.setAnalyzer(analysisExecutor) { proxy ->
             try {
-                val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(proxy)
-                synchronized(ringLock) {
-                    if (burstRingBuffer.size >= 5) {
-                        val oldest = burstRingBuffer.removeFirst()
-                        oldest.recycle()
-                    }
-                    burstRingBuffer.addLast(bmp.copy(Bitmap.Config.ARGB_8888, false))
-                }
                 val now = System.currentTimeMillis()
-                if (now - lastHintTimestampMs > 1400L) {
+                // Only decode a frame when a live hint refresh is actually due (~1.2s)
+                if (now - lastHintTimestampMs > 1200L) {
                     lastHintTimestampMs = now
+                    val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(proxy)
                     onLiveFrameForHint(bmp)
-                } else {
-                    bmp.recycle()
                 }
             } catch (_: Throwable) {
             } finally {
@@ -134,11 +128,17 @@ class CameraController(private val context: Context) {
             imageCapture = capture
             imageAnalysis = analysis
 
-            if (lens == LensOption.TELE_2X) {
-                cam.cameraControl.setZoomRatio(2.0f)
-            } else {
-                cam.cameraControl.setZoomRatio(1.0f)
+            // Samsung One UI routes 0.5x ultrawide through minZoomRatio when physical ID is logical-grouped
+            val zoomState = cam.cameraInfo.zoomState.value
+            val minZ = zoomState?.minZoomRatio ?: 0.5f
+            val maxZ = zoomState?.maxZoomRatio ?: 8.0f
+            val hasPhysicalUw = hardwareProfile?.lenses?.any { it.mappedRole == LensOption.ULTRA_WIDE } == true
+            val targetZoom = when {
+                lens == LensOption.ULTRA_WIDE && !hasPhysicalUw -> max(0.5f, minZ)
+                lens == LensOption.TELE_2X -> 2.0f.coerceAtMost(maxZ)
+                else -> 1.0f.coerceIn(minZ, maxZ)
             }
+            cam.cameraControl.setZoomRatio(targetZoom)
         }
     }
 
@@ -186,7 +186,7 @@ class CameraController(private val context: Context) {
     fun setZoomRatio(ratio: Float) {
         val cam = activeCamera ?: return
         val state = cam.cameraInfo.zoomState.value
-        val clamped = ratio.coerceIn(state?.minZoomRatio ?: 1f, state?.maxZoomRatio ?: 8f)
+        val clamped = ratio.coerceIn(state?.minZoomRatio ?: 0.5f, state?.maxZoomRatio ?: 8f)
         cam.cameraControl.setZoomRatio(clamped)
     }
 
@@ -226,15 +226,16 @@ class CameraController(private val context: Context) {
     }
 
     /**
-     * Captures a high-res photo and optionally fuses recent aligned YUV ring frames for HDR+ noise reduction.
+     * Captures a sharp ISP-stacked photo at working studio resolution (<= 2560px) and optionally
+     * applies edge-preserving shadow chroma denoising without stale pre-shutter ghosting.
      */
     suspend fun captureHighResWithBurst(burstCount: Int): Pair<Bitmap, Int> {
-        val cap = imageCapture ?: error("Camera is not ready yet.")
+        val cap = imageCapture ?: error("Câmera ainda não está pronta.")
         val primaryBmp = suspendCancellableCoroutine<Bitmap> { cont ->
-            cap.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
+            cap.takePicture(captureExecutor, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     try {
-                        val bmp = decodeCapturedImageProxy(image)
+                        val bmp = decodeCapturedImageProxy(image, maxLongEdge = 2560)
                         cont.resume(bmp)
                     } catch (err: Throwable) {
                         cont.resumeWithException(err)
@@ -253,76 +254,105 @@ class CameraController(private val context: Context) {
             return primaryBmp to 1
         }
 
-        val yuvSnaps = synchronized(ringLock) {
-            burstRingBuffer.toList().takeLast((burstCount - 1).coerceAtLeast(0))
-                .map { it.copy(Bitmap.Config.ARGB_8888, false) }
-        }
-        if (yuvSnaps.isEmpty()) {
-            return primaryBmp to 1
-        }
-
         return withContext(Dispatchers.Default) {
-            // Upscale YUV burst frames only for subtle low-frequency shadow denoising blend with crisp primary frame
-            val mergedLowRes = MultiFrameBurstProcessor.mergeBitmaps(yuvSnaps)
-            yuvSnaps.forEach { it.recycle() }
-            val alignedShadowReference = Bitmap.createScaledBitmap(mergedLowRes, primaryBmp.width, primaryBmp.height, true)
-            mergedLowRes.recycle()
-
-            val fused = blendShadowDetail(primaryBmp, alignedShadowReference)
-            alignedShadowReference.recycle()
+            val w = primaryBmp.width
+            val h = primaryBmp.height
+            val px = IntArray(w * h)
+            primaryBmp.getPixels(px, 0, w, 0, 0, w, h)
+            val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(px, w, h)
             primaryBmp.recycle()
-            fused to (1 + yuvSnaps.size)
+            Bitmap.createBitmap(cleaned, w, h, Bitmap.Config.ARGB_8888) to burstCount
         }
     }
 
-    /**
-     * Preserves full-res sharpness of primary frame while pulling clean denoised shadow tone from aligned YUV burst.
-     */
-    private fun blendShadowDetail(primary: Bitmap, denoisedBurst: Bitmap): Bitmap {
-        val w = primary.width
-        val h = primary.height
-        val pPx = IntArray(w * h)
-        val bPx = IntArray(w * h)
-        primary.getPixels(pPx, 0, w, 0, 0, w, h)
-        denoisedBurst.getPixels(bPx, 0, w, 0, 0, w, h)
-
-        val out = IntArray(w * h)
-        for (i in 0 until w * h) {
-            val pc = pPx[i]
-            val bc = bPx[i]
-            val pr = (pc ushr 16) and 0xFF
-            val pg = (pc ushr 8) and 0xFF
-            val pb = pc and 0xFF
-
-            val br = (bc ushr 16) and 0xFF
-            val bg = (bc ushr 8) and 0xFF
-            val bb = bc and 0xFF
-
-            val luma = (0.2126f * pr + 0.7152f * pg + 0.0722f * pb) / 255f
-            val shadowBlend = if (luma < 0.28f) (1f - luma / 0.28f) * 0.28f else 0f
-
-            val r = (pr * (1f - shadowBlend) + br * shadowBlend).toInt().coerceIn(0, 255)
-            val g = (pg * (1f - shadowBlend) + bg * shadowBlend).toInt().coerceIn(0, 255)
-            val b = (pb * (1f - shadowBlend) + bb * shadowBlend).toInt().coerceIn(0, 255)
-            out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-        }
-        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
-    }
-
-    private fun decodeCapturedImageProxy(image: ImageProxy): Bitmap {
+    private fun decodeCapturedImageProxy(image: ImageProxy, maxLongEdge: Int): Bitmap {
         if (image.format == android.graphics.ImageFormat.JPEG) {
             val buffer = image.planes[0].buffer
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
-            val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            val rot = image.imageInfo.rotationDegrees
-            if (rot == 0) return raw
-            val m = Matrix().apply { postRotate(rot.toFloat()) }
-            return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true).also {
-                if (it !== raw) raw.recycle()
+
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val sampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxLongEdge)
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             }
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: error("Falha ao decodificar JPEG da câmera.")
+
+            val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull()
+            val exifOrient = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                ?: ExifInterface.ORIENTATION_NORMAL
+
+            val oriented = applyExifOrRotation(decoded, exifOrient, image.imageInfo.rotationDegrees)
+            return capLongEdge(oriented, maxLongEdge)
         }
-        return MultiFrameBurstProcessor.imageProxyToBitmap(image)
+        val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(image)
+        return capLongEdge(bmp, maxLongEdge)
+    }
+
+    fun decodeGalleryUriOriented(uri: Uri, maxLongEdge: Int = 2560): Bitmap {
+        val resolver = context.contentResolver
+        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: error("Não foi possível abrir a imagem selecionada.")
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val sampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxLongEdge)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            ?: error("Formato de imagem inválido.")
+
+        val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull()
+        val exifOrient = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            ?: ExifInterface.ORIENTATION_NORMAL
+
+        val oriented = applyExifOrRotation(raw, exifOrient, 0)
+        return capLongEdge(oriented, maxLongEdge)
+    }
+
+    private fun computeInSampleSize(w: Int, h: Int, targetMax: Int): Int {
+        var sample = 1
+        val longEdge = max(w, h)
+        while (longEdge / (sample * 2) >= targetMax) {
+            sample *= 2
+        }
+        return sample
+    }
+
+    private fun applyExifOrRotation(bmp: Bitmap, exifOrientation: Int, fallbackRot: Int): Bitmap {
+        val m = Matrix()
+        when (exifOrientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+            else -> if (fallbackRot != 0) m.postRotate(fallbackRot.toFloat()) else return bmp
+        }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        if (rotated !== bmp) bmp.recycle()
+        return rotated
+    }
+
+    private fun capLongEdge(bmp: Bitmap, maxEdge: Int): Bitmap {
+        val longEdge = max(bmp.width, bmp.height)
+        if (longEdge <= maxEdge) return bmp
+        val scale = maxEdge.toFloat() / longEdge
+        val scaled = Bitmap.createScaledBitmap(
+            bmp,
+            max(16, (bmp.width * scale).toInt()),
+            max(16, (bmp.height * scale).toInt()),
+            true
+        )
+        if (scaled !== bmp) bmp.recycle()
+        return scaled
     }
 
     suspend fun saveBitmapToGallery(bitmap: Bitmap, conceptTag: String): Uri = withContext(Dispatchers.IO) {
@@ -353,11 +383,9 @@ class CameraController(private val context: Context) {
     }
 
     fun release() {
-        cameraExecutor.shutdown()
-        synchronized(ringLock) {
-            burstRingBuffer.forEach { it.recycle() }
-            burstRingBuffer.clear()
-        }
+        runCatching { cameraProvider?.unbindAll() }
+        captureExecutor.shutdownNow()
+        analysisExecutor.shutdownNow()
     }
 }
 
@@ -366,8 +394,8 @@ private suspend fun <T> com.google.common.util.concurrent.ListenableFuture<T>.aw
         addListener({
             try {
                 cont.resume(get())
-            } catch (err: Throwable) {
-                cont.resumeWithException(err)
+            } catch (e: Throwable) {
+                cont.resumeWithException(e)
             }
         }, ContextCompat.getMainExecutor(context))
     }

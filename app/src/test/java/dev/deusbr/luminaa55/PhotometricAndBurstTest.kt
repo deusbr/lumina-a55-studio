@@ -4,6 +4,7 @@ import dev.deusbr.luminaa55.camera.MultiFrameBurstProcessor
 import dev.deusbr.luminaa55.context.PhotometricAnalyzer
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.LightDirection
+import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,5 +74,62 @@ class PhotometricAndBurstTest {
         val centerR = (merged[12 * w + 12] ushr 16) and 0xFF
         // Ghost pixel (250) must be rejected so center stays close to 103, not 152
         assertTrue("Expected ghost-rejected red channel < 115, got $centerR", centerR < 115)
+    }
+
+    @Test
+    fun missingSegmentationDisablesBackgroundBlurAndDimming() {
+        val px = solidFrame(32, 32, 128, 128, 128)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32)
+        val concept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person"),
+            faceCount = 1,
+            subjectRatio = 1.0f,
+            userSelectedStock = FilmStock.PORTRA_400,
+            hasConfidentMask = false
+        )
+        assertEquals(0f, concept.recipe.backgroundBokeh, 0.0001f)
+        assertEquals(0f, concept.recipe.backgroundDimming, 0.0001f)
+    }
+
+    @Test
+    fun toneCurvePreservesMidtonesAndRelightsForegroundNotBackground() {
+        val px = solidFrame(32, 32, 128, 128, 128)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.5f)
+        val concept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person"),
+            faceCount = 1,
+            subjectRatio = 0.35f,
+            userSelectedStock = FilmStock.PORTRA_400,
+            hasConfidentMask = true
+        )
+        val recipe = concept.recipe.copy(faceRelightGain = 0.25f, backgroundDimming = 0.12f, grainAmount = 0f, vignetteStrength = 0f)
+
+        val fgOut = EditorialShaderEngine.applyEditorialToneToPixel(
+            r = 0.5f, g = 0.5f, b = 0.5f,
+            nx = 0f, ny = 0f, x = 8, y = 8,
+            mask = 1.0f, hasConfidentMask = true, recipe = recipe
+        )
+        val bgOut = EditorialShaderEngine.applyEditorialToneToPixel(
+            r = 0.5f, g = 0.5f, b = 0.5f,
+            nx = 0f, ny = 0f, x = 8, y = 8,
+            mask = 0.0f, hasConfidentMask = true, recipe = recipe
+        )
+        val fgR = (fgOut ushr 16) and 0xFF
+        val bgR = (bgOut ushr 16) and 0xFF
+        assertTrue("Foreground ($fgR) must be brighter than background ($bgR)", fgR > bgR)
+        assertTrue("Midtone foreground ($fgR) must not be crushed dark", fgR in 120..180)
+    }
+
+    @Test
+    fun shadowChromaDenoiseSmoothsDarkNoiseWithoutShiftingFlatBrightness() {
+        val w = 16
+        val h = 16
+        val noisy = solidFrame(w, h, 36, 36, 36)
+        noisy[8 * w + 8] = (0xFF shl 24) or (48 shl 16) or (28 shl 8) or 36
+        val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(noisy, w, h)
+        val cr = (cleaned[8 * w + 8] ushr 16) and 0xFF
+        assertTrue("Expected smoothed dark pixel between 36 and 46, got $cr", cr in 36..46)
     }
 }

@@ -123,7 +123,8 @@ object PhotometricAnalyzer {
         labels: List<String>,
         faceCount: Int,
         subjectRatio: Float,
-        userSelectedStock: FilmStock = FilmStock.AUTO_EDITORIAL
+        userSelectedStock: FilmStock = FilmStock.AUTO_EDITORIAL,
+        hasConfidentMask: Boolean = true
     ): SceneConcept {
         val normLabels = labels.map { it.lowercase() }
         val hasPerson = faceCount > 0 || normLabels.any { it.contains("person") || it.contains("selfie") || it.contains("smile") || it.contains("portrait") || it.contains("fashion") }
@@ -194,66 +195,66 @@ object PhotometricAnalyzer {
             }
         }
 
-        // Base recipe per stock
+        // Base recipe per stock (calibrated to keep true midtones and clean shadows)
         var exposureOffset = 0.0f
-        var contrast = 1.08f
-        var shadowLift = 0.04f
-        var highlightRollOff = 0.35f
-        var clarity = 0.14f
-        var warmth = 0.02f
+        var contrast = 1.05f
+        var shadowLift = 0.02f
+        var highlightRollOff = 0.32f
+        var clarity = 0.06f
+        var warmth = 0.015f
         var tint = 0.0f
         var saturation = 1.02f
-        var skinProtection = if (hasPerson) 0.85f else 0.35f
+        val skinProtection = if (hasPerson) 0.88f else 0.35f
         var faceRelight = 0.0f
         var bgDimming = 0.0f
         var bgBokeh = 0.0f
         var skyRecovery = 0.0f
-        var halation = 0.12f
-        var proMist = 0.14f
-        var grain = 0.10f
-        var vignette = 0.22f
+        var halation = 0.05f
+        var proMist = 0.08f
+        var grain = 0.05f
+        var vignette = 0.12f
         var mono = false
 
         when (activeStock) {
             FilmStock.PORTRA_400 -> {
-                contrast = 1.07f; shadowLift = 0.06f; highlightRollOff = 0.42f
-                warmth = 0.04f; tint = 0.015f; saturation = 0.98f; proMist = 0.18f; grain = 0.11f
+                contrast = 1.05f; shadowLift = 0.03f; highlightRollOff = 0.38f
+                warmth = 0.03f; tint = 0.01f; saturation = 0.99f; proMist = 0.09f; grain = 0.06f; vignette = 0.12f
             }
             FilmStock.CINESTILL_800T -> {
-                contrast = 1.15f; shadowLift = 0.02f; highlightRollOff = 0.48f
-                warmth = -0.07f; tint = -0.02f; saturation = 1.05f; halation = 0.34f; proMist = 0.22f; grain = 0.16f; vignette = 0.30f
+                contrast = 1.10f; shadowLift = 0.01f; highlightRollOff = 0.42f
+                warmth = -0.05f; tint = -0.015f; saturation = 1.04f; halation = 0.28f; proMist = 0.12f; grain = 0.09f; vignette = 0.18f
             }
             FilmStock.HASSELBLAD_NATURAL -> {
-                contrast = 1.05f; shadowLift = 0.03f; highlightRollOff = 0.38f
-                warmth = 0.0f; saturation = 0.97f; clarity = 0.22f; proMist = 0.06f; grain = 0.04f; vignette = 0.14f
+                contrast = 1.04f; shadowLift = 0.02f; highlightRollOff = 0.34f
+                warmth = 0.0f; saturation = 0.98f; clarity = 0.10f; proMist = 0.03f; grain = 0.02f; vignette = 0.08f
             }
             FilmStock.KODAK_GOLD_200 -> {
-                contrast = 1.10f; shadowLift = 0.05f; highlightRollOff = 0.40f
-                warmth = 0.09f; tint = 0.01f; saturation = 1.06f; halation = 0.16f; proMist = 0.15f; grain = 0.13f
+                contrast = 1.07f; shadowLift = 0.025f; highlightRollOff = 0.36f
+                warmth = 0.06f; tint = 0.01f; saturation = 1.05f; halation = 0.08f; proMist = 0.08f; grain = 0.07f; vignette = 0.12f
             }
             FilmStock.LEICA_MONOCHROME -> {
-                contrast = 1.24f; shadowLift = 0.02f; highlightRollOff = 0.45f
-                clarity = 0.28f; saturation = 0f; halation = 0.08f; proMist = 0.10f; grain = 0.18f; vignette = 0.34f; mono = true
+                contrast = 1.16f; shadowLift = 0.01f; highlightRollOff = 0.40f
+                clarity = 0.14f; saturation = 0f; halation = 0.04f; proMist = 0.05f; grain = 0.10f; vignette = 0.20f; mono = true
             }
             FilmStock.AUTO_EDITORIAL -> Unit
         }
 
-        // Context-driven adaptive adjustments
+        // Context-driven adaptive adjustments (background blur/dimming ONLY when a real confident mask exists)
         if (isBacklit && hasPerson) {
-            faceRelight += 0.28f
-            bgDimming += 0.14f
-            highlightRollOff = max(highlightRollOff, 0.55f)
-            proMist = max(proMist, 0.24f)
-            adjustments.add("Relight facial em contraluz (+28%)")
+            faceRelight += 0.26f
+            if (hasConfidentMask) bgDimming += 0.10f
+            highlightRollOff = max(highlightRollOff, 0.50f)
+            proMist = max(proMist, 0.12f)
+            adjustments.add("Relight facial em contraluz (+26%)")
         } else if (hasPerson && stats.centerLuma < 0.38f) {
-            faceRelight += 0.18f
-            adjustments.add("Abertura seletiva de rosto (+18%)")
+            faceRelight += 0.15f
+            adjustments.add("Abertura seletiva de rosto (+15%)")
         }
 
-        if (hasPerson && subjectRatio in 0.05f..0.72f) {
-            bgBokeh = 0.42f
-            bgDimming = max(bgDimming, 0.12f)
-            adjustments.add("Separação ótica de fundo (bokeh suave + negative fill)")
+        if (hasConfidentMask && subjectRatio in 0.07f..0.74f && (hasPerson || hasPet || !hasSky)) {
+            bgBokeh = 0.40f
+            bgDimming = max(bgDimming, 0.09f)
+            adjustments.add("Bokeh ótico real no segundo plano + separação sutil")
         }
 
         if (hasPerson) {
@@ -261,29 +262,29 @@ object PhotometricAnalyzer {
         }
 
         if (hasSky || stats.highlightClipRatio > 0.06f) {
-            skyRecovery = 0.36f
-            highlightRollOff = max(highlightRollOff, 0.52f)
-            adjustments.add("Recuperação de altas luzes / céu (ACES roll-off)")
+            skyRecovery = 0.32f
+            highlightRollOff = max(highlightRollOff, 0.48f)
+            adjustments.add("Recuperação de altas luzes / céu (roll-off suave)")
         }
 
         if (hasFood || hasUrban || hasPet) {
-            clarity = max(clarity, 0.24f)
+            clarity = max(clarity, 0.11f)
             adjustments.add("Micro-contraste de textura seletivo")
         }
 
         if (isNight) {
             exposureOffset += 0.08f
-            halation = max(halation, 0.28f)
+            halation = max(halation, 0.18f)
             adjustments.add("Halation noturna e controle de sombras")
         }
 
         if (stats.dynamicRangeSpread < 0.42f) {
-            contrast += 0.08f
+            contrast += 0.05f
             adjustments.add("Expansão de contraste tonal")
         }
 
         if (adjustments.isEmpty()) {
-            adjustments.add("Curva ACES fílmica + Black Pro-Mist sutil")
+            adjustments.add("Curva fílmica natural + controle de altas luzes")
         }
 
         return SceneConcept(
@@ -292,6 +293,7 @@ object PhotometricAnalyzer {
             detectedTags = labels.take(5),
             faceCount = faceCount,
             subjectRatio = subjectRatio,
+            hasConfidentMask = hasConfidentMask,
             lighting = stats.lightDirection,
             recommendedStock = activeStock,
             appliedAdjustments = adjustments,

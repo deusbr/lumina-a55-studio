@@ -206,4 +206,47 @@ object MultiFrameBurstProcessor {
         val merged = mergeArgbBurst(arrays, w, h, searchRadius = 4)
         return Bitmap.createBitmap(merged, w, h, Bitmap.Config.ARGB_8888)
     }
+
+    /**
+     * Edge-preserving shadow chroma & luma noise suppression for crisp single/multi-frame handheld captures
+     * without introducing pre-shutter motion ghosting.
+     */
+    fun denoiseShadowChroma(pixels: IntArray, width: Int, height: Int): IntArray {
+        val out = pixels.copyOf()
+        for (y in 1 until height - 1) {
+            val row = y * width
+            for (x in 1 until width - 1) {
+                val i = row + x
+                val c = pixels[i]
+                val cr = (c ushr 16) and 0xFF
+                val cg = (c ushr 8) and 0xFF
+                val cb = c and 0xFF
+                val luma = (0.2126f * cr + 0.7152f * cg + 0.0722f * cb) / 255f
+                if (luma > 0.38f) continue
+
+                var accR = cr.toFloat(); var accG = cg.toFloat(); var accB = cb.toFloat(); var wSum = 1f
+                val neighbors = intArrayOf(i - 1, i + 1, i - width, i + width)
+                for (ni in neighbors) {
+                    val nc = pixels[ni]
+                    val nr = (nc ushr 16) and 0xFF
+                    val ng = (nc ushr 8) and 0xFF
+                    val nb = nc and 0xFF
+                    val diff = (abs(cr - nr) + abs(cg - ng) + abs(cb - nb)) / 3f
+                    if (diff < 22f) {
+                        val w = 1f - diff / 24f
+                        accR += nr * w; accG += ng * w; accB += nb * w; wSum += w
+                    }
+                }
+                val blend = ((0.38f - luma) / 0.38f) * 0.45f
+                val dr = (accR / wSum)
+                val dg = (accG / wSum)
+                val db = (accB / wSum)
+                val fr = (cr * (1f - blend) + dr * blend).toInt().coerceIn(0, 255)
+                val fg = (cg * (1f - blend) + dg * blend).toInt().coerceIn(0, 255)
+                val fb = (cb * (1f - blend) + db * blend).toInt().coerceIn(0, 255)
+                out[i] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
+            }
+        }
+        return out
+    }
 }

@@ -109,6 +109,7 @@ data class SceneConcept(
     val detectedTags: List<String>,
     val faceCount: Int,
     val subjectRatio: Float,
+    val hasConfidentMask: Boolean = true,
     val lighting: LightDirection,
     val recommendedStock: FilmStock,
     val appliedAdjustments: List<String>,
@@ -124,5 +125,9 @@ data class CapturedPhotoSession(
     val gpuAccelerated: Boolean,
     val processingTimeMs: Long,
     val lensUsed: LensOption,
-    val savedUriString: String? = null
+    val savedUriString: String? = null,
+    val cachedStats: PhotometricStats? = null,
+    val cachedLabels: List<String> = emptyList(),
+    val cachedFaceCount: Int = 0,
+    val hasConfidentMask: Boolean = true
 )

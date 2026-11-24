@@ -11,8 +11,8 @@ android {
         applicationId = "dev.deusbr.luminaa55"
         minSdk = 33
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -83,10 +83,12 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.camera:camera-extensions:$cameraxVersion")
 
-    // Offline On-Device Vision (Bundled Face + Labeling + Subject Segmentation)
+    // Offline On-Device Vision (Bundled Face + Labeling + Selfie Seg + Subject Seg)
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mlkit:image-labeling:17.0.9")
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
+    implementation("com.google.android.gms:play-services-base:18.5.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
