@@ -166,10 +166,13 @@ class NeuralStudioEngine(private val context: Context) {
 
         val out = IntArray(w * h)
         for (i in 0 until w * h) {
-            val fgByte = (alpha512[i].coerceIn(0f, 1f) * 255f).toInt()
             val sc = segPx?.get(i) ?: 0
             val skinByte = (sc ushr 8) and 0xFF
             val detailByte = sc and 0xFF
+            // Never allow segmented human skin to drop to background under MODNet
+            val modFg = alpha512[i].coerceIn(0f, 1f)
+            val skinProtect = if (skinByte > 85) skinByte / 255f else 0f
+            val fgByte = (max(modFg, skinProtect) * 255f).toInt().coerceIn(0, 255)
             out[i] = Color.argb(255, fgByte, skinByte, detailByte)
         }
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
@@ -477,7 +480,7 @@ class NeuralStudioEngine(private val context: Context) {
                 norm[i] = ((rawInvDepth[i] - dMin) / span).coerceIn(0f, 1f)
             }
 
-            // Focus plane = average depth across foreground mask (or upper-center subject zone)
+            // Focus plane = average depth across foreground subject mask; if subject is tiny/distant (<14% of frame), keep CoC=0 to avoid blurring distant people behind foreground objects
             var focusSum = 0.0
             var focusCount = 0
             if (fgMask != null && fgMask.size == norm.size) {
@@ -488,14 +491,8 @@ class NeuralStudioEngine(private val context: Context) {
                     }
                 }
             }
-            if (focusCount < (w * h) / 40) {
-                focusSum = 0.0; focusCount = 0
-                for (y in (h * 0.25f).toInt()..(h * 0.72f).toInt()) {
-                    for (x in (w * 0.30f).toInt()..(w * 0.70f).toInt()) {
-                        focusSum += norm[y * w + x]
-                        focusCount++
-                    }
-                }
+            if (focusCount < (w * h) / 7) {
+                return DepthCocOutput(normalizedDepth = norm, cocBlur = FloatArray(norm.size), focusDepth = 0.5f)
             }
             val focusDepth = if (focusCount > 0) (focusSum / focusCount).toFloat() else 0.65f
 

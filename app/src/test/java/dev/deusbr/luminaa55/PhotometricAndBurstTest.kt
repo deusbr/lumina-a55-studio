@@ -292,4 +292,20 @@ class PhotometricAndBurstTest {
         assertTrue(prompt.contains("STRICT PRESERVATION RULE"))
         assertTrue(prompt.contains("FORBIDDEN aesthetics: plastic/waxy skin"))
     }
+
+    @Test
+    fun environmentalWideSceneWithSmallOrNoFaceNeverBlursSubjectOrBackground() {
+        val px = solidFrame(32, 32, 95, 96, 98)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32)
+        val officeScene = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Computer", "Desk", "Room"),
+            faceCount = 0,
+            subjectRatio = 0.14f,
+            userSelectedStock = FilmStock.AUTO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        assertEquals("Wide office scene must NOT blur subjects behind boxes", 0f, officeScene.recipe.backgroundBokeh, 0.001f)
+        assertEquals("Wide office scene must NOT darken background like portrait studio", 0f, officeScene.recipe.studioBackdropStrength, 0.001f)
+    }
 }

@@ -70,8 +70,16 @@ class GeminiStudioService(context: Context) {
 
         if (mode.outputsImageDirectly) {
             val imagePrompt = PhotographyCrewDirector.buildGeminiGenerativePrompt(baseSheet, baseConcept)
-            val candidates = listOf(mode.modelId, "gemini-3.1-flash-image-preview", "gemini-2.5-flash-image").distinct()
+            val candidates = listOf(
+                mode.modelId,
+                "gemini-3.1-flash-image-preview",
+                "gemini-3.1-flash-image",
+                "gemini-2.5-flash-image",
+                "gemini-3-pro-image-preview",
+                "gemini-3-pro-image"
+            ).distinct()
             var lastQuotaError: String? = null
+            var lastHttpError: String? = null
 
             for (modelId in candidates) {
                 val resp = postGenerateContent(
@@ -102,24 +110,15 @@ class GeminiStudioService(context: Context) {
                     lastQuotaError = resp.errorMessage
                 } else if (resp.httpCode == 400 || resp.httpCode == 401 || resp.httpCode == 403) {
                     error("Chave Gemini recusada (HTTP ${resp.httpCode}): ${resp.errorMessage}")
+                } else {
+                    lastHttpError = "HTTP ${resp.httpCode}: ${resp.errorMessage}"
                 }
             }
 
-            // Graceful fallback: free-tier Gemini keys return 429 limit:0 for IMAGE output -> run Vision Crew Director online
-            val visionRes = runVisionDirectorOnline(
-                apiKey = apiKey,
-                base64Jpeg = encodeDownscaledJpegBase64(sourceBitmap, maxDim = 1024),
-                baseConcept = baseConcept,
-                baseSheet = baseSheet,
-                stats = stats
-            )
-            return@withContext visionRes.copy(
-                statusNote = if (lastQuotaError != null) {
-                    "Cota de imagem Gemini indisponível neste plano; Banca Gemini Vision calibrou a GPU local."
-                } else {
-                    visionRes.statusNote
-                }
-            )
+            if (lastQuotaError != null) {
+                error("Sua chave Gemini está sem cota de geração de imagem (HTTP 429). Ative o faturamento no Google AI Studio ou selecione 'Gemini Diretor + GPU Local' na chave (🔑).")
+            }
+            error("Gemini Estúdio falhou (${lastHttpError ?: "sem resposta de imagem"}). Tente novamente ou use o Motor Offline.")
         }
 
         return@withContext runVisionDirectorOnline(
@@ -182,6 +181,7 @@ class GeminiStudioService(context: Context) {
         return runCatching {
             val obj = JSONObject(cleaned)
             val r = baseConcept.recipe
+            val allowPortraitBokeh = baseConcept.recipe.backgroundBokeh > 0.05f
             val updatedRecipe = r.copy(
                 exposureOffset = obj.optDouble("exposureOffset", r.exposureOffset.toDouble()).toFloat().coerceIn(-0.25f, 0.35f),
                 contrast = obj.optDouble("contrast", r.contrast.toDouble()).toFloat().coerceIn(1.02f, 1.28f),
@@ -191,9 +191,9 @@ class GeminiStudioService(context: Context) {
                 saturation = obj.optDouble("saturation", r.saturation.toDouble()).toFloat().coerceIn(0.92f, 1.16f),
                 faceRelightGain = obj.optDouble("faceRelightGain", r.faceRelightGain.toDouble()).toFloat().coerceIn(0f, 0.36f),
                 relight3dStrength = obj.optDouble("relight3dStrength", r.relight3dStrength.toDouble()).toFloat().coerceIn(0f, 1.05f),
-                backgroundBokeh = obj.optDouble("backgroundBokeh", r.backgroundBokeh.toDouble()).toFloat().coerceIn(0f, 1.0f),
-                backgroundDimming = obj.optDouble("backgroundDimming", r.backgroundDimming.toDouble()).toFloat().coerceIn(0f, 0.45f),
-                studioBackdropStrength = obj.optDouble("studioBackdropStrength", r.studioBackdropStrength.toDouble()).toFloat().coerceIn(0f, 0.65f),
+                backgroundBokeh = if (allowPortraitBokeh) obj.optDouble("backgroundBokeh", r.backgroundBokeh.toDouble()).toFloat().coerceIn(0f, 1.0f) else 0f,
+                backgroundDimming = if (allowPortraitBokeh) obj.optDouble("backgroundDimming", r.backgroundDimming.toDouble()).toFloat().coerceIn(0f, 0.45f) else 0f,
+                studioBackdropStrength = if (allowPortraitBokeh) obj.optDouble("studioBackdropStrength", r.studioBackdropStrength.toDouble()).toFloat().coerceIn(0f, 0.65f) else 0f,
                 clarity = obj.optDouble("clarity", r.clarity.toDouble()).toFloat().coerceIn(0.08f, 0.32f),
                 keyDirectionSign = if (obj.optDouble("keyDirectionSign", r.keyDirectionSign.toDouble()) >= 0.0) 1.0f else -1.0f
             )

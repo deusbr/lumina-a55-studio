@@ -52,12 +52,14 @@ object EditorialShaderEngine {
 
     private const val AGSL_STUDIO_SHADER = """
         uniform shader inputImage;
+        uniform shader blurredImage;
         uniform shader subjectMask;
         uniform shader depthMap;
         uniform shader neuralGainMap;
 
         uniform float2 fullImageSize;
         uniform float2 tileOrigin;
+        uniform float2 blurSize;
         uniform float2 maskSize;
         uniform float2 depthSize;
         uniform float2 gainSize;
@@ -122,7 +124,11 @@ object EditorialShaderEngine {
 
         float sampleBokehWeight(float2 globalCoord) {
             float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
-            float fg = hasSubjectMask > 0.5 ? clamp(sampleSemantic(globalCoord).r, 0.0, 1.0) : 1.0;
+            float4 sem = sampleSemantic(globalCoord);
+            float fg = hasSubjectMask > 0.5 ? clamp(sem.r, 0.0, 1.0) : 1.0;
+            float skin = hasSubjectMask > 0.5 ? clamp(sem.g, 0.0, 1.0) : 0.0;
+            // Never blur segmented human skin pixels even if foreground depth estimation missed them
+            if (hasSubjectMask > 0.5 && skin > 0.25) return 0.0;
             float segBg = hasSubjectMask > 0.5 ? clamp(1.0 - fg, 0.0, 1.0) : 0.0;
             if (hasDepthMap > 0.5) {
                 float depthCoc = clamp(float(depthMap.eval(uv * depthSize).g), 0.0, 1.0);
@@ -170,27 +176,29 @@ object EditorialShaderEngine {
             float3 centerBackdropRgb = applyStudioBackdrop(float3(baseSample.rgb), uv, asp, bgWeight, fgMask);
             float3 rgb = centerBackdropRgb;
 
-            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (pre-decontaminated taps prevent edge halo bleed)
+            // 1. Creamy Smooth Optical Bokeh via Pre-Blurred Pyramid + Tight 8-Tap Micro-Blend (zero dot/wave ghosting)
             if (backgroundBokeh > 0.01 && bgWeight > 0.015) {
-                float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.022, 10.0, 52.0);
-                float3 acc = centerBackdropRgb;
-                float weightSum = 1.0;
+                float3 pyrBlur = float3(blurredImage.eval(uv * blurSize).rgb);
+                float microR = bgWeight * backgroundBokeh * clamp(minDim * 0.0045, 3.0, 8.0);
+                float3 acc = centerBackdropRgb + pyrBlur * 2.5;
+                float weightSum = 3.5;
                 float goldenAngle = 2.39996323;
-                for (int i = 0; i < 24; i++) {
+                for (int i = 0; i < 8; i++) {
                     float fi = float(i + 1);
-                    float rFrac = sqrt(fi / 24.0);
+                    float rFrac = sqrt(fi / 8.0);
                     float ang = fi * goldenAngle;
-                    float2 off = float2(cos(ang), sin(ang)) * (rFrac * radius);
+                    float2 off = float2(cos(ang), sin(ang)) * (rFrac * microR);
                     float2 tapGlobal = globalCoord + off;
                     float2 tapUv = clamp(tapGlobal / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
                     float sf = hasSubjectMask > 0.5 ? clamp(sampleSemantic(tapGlobal).r, 0.0, 1.0) : 0.0;
                     float tapBgWeight = sampleBokehWeight(tapGlobal);
                     float3 tapCol = applyStudioBackdrop(float3(inputImage.eval(fragCoord + off).rgb), tapUv, asp, tapBgWeight, sf);
-                    float w = 1.0 - smoothstep(0.28, 0.82, sf);
+                    float w = (1.0 - smoothstep(0.32, 0.85, sf)) * 0.45;
                     acc += tapCol * w;
                     weightSum += w;
                 }
-                rgb = mix(centerBackdropRgb, acc / max(weightSum, 0.001), smoothstep(0.02, 0.82, bgWeight));
+                float3 softBlurTone = applyStudioBackdrop(acc / max(weightSum, 0.001), uv, asp, bgWeight, fgMask);
+                rgb = mix(centerBackdropRgb, softBlurTone, smoothstep(0.04, 0.80, bgWeight * backgroundBokeh));
             }
 
             // 2. Apply Zero-DCE Neural Gain Map ONLY when genuinely dark scene triggered it
@@ -382,11 +390,14 @@ object EditorialShaderEngine {
         val safeMask = subjectMask ?: neutralMask1x1
         val safeDepth = depthMap ?: neutralDepth1x1
         val safeGain = neuralGainMap ?: neutralGain1x1
+        val needsBlurPyramid = scaledRecipe.backgroundBokeh > 0.01f && hasConfidentMask && subjectMask != null
+        val blurredBg = if (needsBlurPyramid) buildSmoothBokehPyramid(source, scaledRecipe.backgroundBokeh) else source
 
         val gpuBitmap = runCatching {
             if (max(source.width, source.height) <= MAX_SINGLE_PASS_DIM) {
                 renderSingleTileGpu(
                     tileSource = source,
+                    blurredSource = blurredBg,
                     subjectMask = safeMask,
                     depthMap = safeDepth,
                     neuralGainMap = safeGain,
@@ -403,6 +414,7 @@ object EditorialShaderEngine {
             } else {
                 renderTiledGpu(
                     source = source,
+                    blurredSource = blurredBg,
                     subjectMask = safeMask,
                     depthMap = safeDepth,
                     neuralGainMap = safeGain,
@@ -416,6 +428,8 @@ object EditorialShaderEngine {
         }.onFailure { err ->
             android.util.Log.e("EditorialShaderEngine", "GPU RuntimeShader failed, falling back to CPU", err)
         }.getOrNull()
+
+        if (blurredBg !== source) blurredBg.recycle()
 
         if (gpuBitmap != null) {
             return ShaderRenderResult(bitmap = gpuBitmap, gpuAccelerated = true)
@@ -452,8 +466,62 @@ object EditorialShaderEngine {
         )
     }
 
+    private fun buildSmoothBokehPyramid(source: Bitmap, bokehStrength: Float): Bitmap {
+        val divisor = (6.0f + bokehStrength * 4.0f).coerceIn(5.0f, 10.0f)
+        val bw = max(32, (source.width / divisor).toInt())
+        val bh = max(32, (source.height / divisor).toInt())
+        val tiny = Bitmap.createScaledBitmap(source, bw, bh, true)
+        val px = IntArray(bw * bh)
+        tiny.getPixels(px, 0, bw, 0, 0, bw, bh)
+        tiny.recycle()
+
+        val radius = 3
+        val pass1 = boxBlurArgb(px, bw, bh, radius)
+        val pass2 = boxBlurArgb(pass1, bw, bh, radius)
+        return Bitmap.createBitmap(pass2, bw, bh, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun boxBlurArgb(src: IntArray, w: Int, h: Int, r: Int): IntArray {
+        val win = 2 * r + 1
+        val horiz = IntArray(w * h)
+        for (y in 0 until h) {
+            val row = y * w
+            var sr = 0; var sg = 0; var sb = 0
+            for (k in -r..r) {
+                val c = src[row + k.coerceIn(0, w - 1)]
+                sr += (c ushr 16) and 0xFF; sg += (c ushr 8) and 0xFF; sb += c and 0xFF
+            }
+            for (x in 0 until w) {
+                horiz[row + x] = Color.argb(255, sr / win, sg / win, sb / win)
+                val add = src[row + (x + r + 1).coerceAtMost(w - 1)]
+                val sub = src[row + (x - r).coerceAtLeast(0)]
+                sr += ((add ushr 16) and 0xFF) - ((sub ushr 16) and 0xFF)
+                sg += ((add ushr 8) and 0xFF) - ((sub ushr 8) and 0xFF)
+                sb += (add and 0xFF) - (sub and 0xFF)
+            }
+        }
+        val out = IntArray(w * h)
+        for (x in 0 until w) {
+            var sr = 0; var sg = 0; var sb = 0
+            for (k in -r..r) {
+                val c = horiz[k.coerceIn(0, h - 1) * w + x]
+                sr += (c ushr 16) and 0xFF; sg += (c ushr 8) and 0xFF; sb += c and 0xFF
+            }
+            for (y in 0 until h) {
+                out[y * w + x] = Color.argb(255, sr / win, sg / win, sb / win)
+                val add = horiz[(y + r + 1).coerceAtMost(h - 1) * w + x]
+                val sub = horiz[(y - r).coerceAtLeast(0) * w + x]
+                sr += ((add ushr 16) and 0xFF) - ((sub ushr 16) and 0xFF)
+                sg += ((add ushr 8) and 0xFF) - ((sub ushr 8) and 0xFF)
+                sb += (add and 0xFF) - (sub and 0xFF)
+            }
+        }
+        return out
+    }
+
     private fun renderTiledGpu(
         source: Bitmap,
+        blurredSource: Bitmap,
         subjectMask: Bitmap,
         depthMap: Bitmap,
         neuralGainMap: Bitmap,
@@ -485,6 +553,7 @@ object EditorialShaderEngine {
                 val subSrc = Bitmap.createBitmap(source, srcX0, srcY0, srcW, srcH)
                 val subRendered = renderSingleTileGpu(
                     tileSource = subSrc,
+                    blurredSource = blurredSource,
                     subjectMask = subjectMask,
                     depthMap = depthMap,
                     neuralGainMap = neuralGainMap,
@@ -516,6 +585,7 @@ object EditorialShaderEngine {
 
     private fun renderSingleTileGpu(
         tileSource: Bitmap,
+        blurredSource: Bitmap,
         subjectMask: Bitmap,
         depthMap: Bitmap,
         neuralGainMap: Bitmap,
@@ -533,12 +603,14 @@ object EditorialShaderEngine {
         val h = tileSource.height
         val shader = RuntimeShader(AGSL_STUDIO_SHADER)
         shader.setInputShader("inputImage", BitmapShader(tileSource, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        shader.setInputShader("blurredImage", BitmapShader(blurredSource, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setInputShader("subjectMask", BitmapShader(subjectMask, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setInputShader("depthMap", BitmapShader(depthMap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setInputShader("neuralGainMap", BitmapShader(neuralGainMap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
 
         shader.setFloatUniform("fullImageSize", fullW.toFloat(), fullH.toFloat())
         shader.setFloatUniform("tileOrigin", tileOriginX, tileOriginY)
+        shader.setFloatUniform("blurSize", blurredSource.width.toFloat(), blurredSource.height.toFloat())
         shader.setFloatUniform("maskSize", subjectMask.width.toFloat(), subjectMask.height.toFloat())
         shader.setFloatUniform("depthSize", depthMap.width.toFloat(), depthMap.height.toFloat())
         shader.setFloatUniform("gainSize", neuralGainMap.width.toFloat(), neuralGainMap.height.toFloat())

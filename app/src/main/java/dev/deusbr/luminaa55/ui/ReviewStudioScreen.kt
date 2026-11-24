@@ -237,10 +237,22 @@ fun ReviewStudioScreen(
                 } else {
                     Text("Ficha da Banca: ${session.concept.conceptSummary}", color = LuminaColors.InkSecondary, fontSize = 11.sp)
                 }
-                session.onlineNotes?.let { note ->
-                    Text(note, color = LuminaColors.OpticalAmber, fontSize = 10.sp, fontWeight = FontWeight.Medium)
-                }
             }
+        }
+
+        val bannerNote = session.onlineNotes ?: state.statusMessage?.takeIf { it.contains("Gemini", ignoreCase = true) || it.contains("429") }
+        if (!bannerNote.isNullOrBlank()) {
+            Text(
+                text = bannerNote,
+                color = LuminaColors.OpticalAmber,
+                fontSize = 11.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(LuminaColors.OpticalAmber.copy(alpha = 0.12f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
         }
 
         // Uncluttered Full-Canvas Photo Viewer (Hold anywhere for Original, or toggle Split)

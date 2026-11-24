@@ -64,7 +64,7 @@ data class LuminaUiState(
     val activeSession: CapturedPhotoSession? = null,
     val editIntensity: Float = 1.0f,
     val processingEngine: ProcessingEngine = ProcessingEngine.OFFLINE_LOCAL,
-    val geminiOnlineMode: GeminiOnlineMode = GeminiOnlineMode.VISION_CREW_DIRECTOR,
+    val geminiOnlineMode: GeminiOnlineMode = GeminiOnlineMode.STUDIO_IMAGE_FLASH,
     val hasGeminiKey: Boolean = false,
     val showGeminiSettingsDialog: Boolean = false,
     val isOnlineProcessing: Boolean = false
@@ -638,7 +638,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                 var finalConcept = analysis.concept
                 var note: String? = null
                 val renderedFullRes = if (activeEngine == ProcessingEngine.ONLINE_GEMINI) {
-                    val onlineRes = runCatching {
+                    val onlineOutcome = runCatching {
                         geminiService.enhanceWithGemini(
                             sourceBitmap = fullBmp,
                             baseConcept = analysis.concept,
@@ -648,7 +648,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                             mode = state.geminiOnlineMode,
                             hasNeuralAlpha = "MODNet-Guided" in analysis.aiModelsUsed
                         )
-                    }.getOrNull()
+                    }
+                    val onlineRes = onlineOutcome.getOrNull()
                     if (onlineRes != null) {
                         finalConcept = onlineRes.calibratedConcept
                         note = onlineRes.statusNote
@@ -669,7 +670,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                     } else {
-                        note = "Falha no Gemini Online — exibindo Motor Offline."
+                        note = onlineOutcome.exceptionOrNull()?.message ?: "Falha no Gemini Online — usando Motor Offline."
                         withContext(Dispatchers.Default) {
                             EditorialShaderEngine.renderEditorial(
                                 source = fullBmp,

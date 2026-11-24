@@ -17,23 +17,23 @@ enum class GeminiOnlineMode(
     val description: String,
     val outputsImageDirectly: Boolean
 ) {
-    VISION_CREW_DIRECTOR(
-        modelId = "gemini-3.8-flash",
-        label = "Gemini Diretor + GPU",
-        description = "Banca de 6 especialistas analisa a foto na nuvem e calibra a GPU local",
-        outputsImageDirectly = false
-    ),
     STUDIO_IMAGE_FLASH(
         modelId = "gemini-3.1-flash-image-preview",
-        label = "Gemini Flash Image",
-        description = "Gera revelação completa em estúdio na nuvem (requer cota de imagem na chave)",
+        label = "Gemini Flash Image (Nuvem)",
+        description = "Gera revelação completa em estúdio na nuvem (requer cota/faturamento na chave Gemini)",
         outputsImageDirectly = true
     ),
     STUDIO_IMAGE_PRO(
         modelId = "gemini-3-pro-image-preview",
-        label = "Gemini Pro Image",
-        description = "Máxima fidelidade fotográfica na nuvem (requer cota de imagem na chave)",
+        label = "Gemini Pro Image (Estúdio Max)",
+        description = "Máxima fidelidade fotográfica na nuvem (requer cota/faturamento na chave Gemini)",
         outputsImageDirectly = true
+    ),
+    VISION_CREW_DIRECTOR(
+        modelId = "gemini-3.8-flash",
+        label = "Gemini Diretor + GPU Local",
+        description = "Banca de 6 especialistas analisa a foto na nuvem e calibra a GPU local (plano gratuito)",
+        outputsImageDirectly = false
     )
 }
 

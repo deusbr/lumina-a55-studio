@@ -261,16 +261,26 @@ object PhotometricAnalyzer {
             adjustments.add("Escultura 3D softbox + rim light")
         }
 
-        if (hasConfidentMask && subjectRatio in 0.05f..0.90f && (hasPerson || hasPet || !hasSky)) {
-            bgBokeh = if (hasPerson) 0.94f else 0.68f
-            bgDimming = max(bgDimming, if (hasPerson) 0.34f else 0.16f)
+        val canPortraitBokeh = hasConfidentMask && (
+            (hasPerson && faceCount > 0 && subjectRatio in 0.22f..0.92f) ||
+                (hasPet && !hasSky && subjectRatio in 0.18f..0.88f)
+            )
+        if (canPortraitBokeh) {
+            bgBokeh = if (hasPerson) 0.86f else 0.62f
+            bgDimming = max(bgDimming, if (hasPerson) 0.28f else 0.14f)
             if (hasPerson && !hasSky && !hasPlant) {
-                // Indoor portrait: subtle natural studio ambient falloff preserving organic hair separation
-                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.44f else 0.36f
+                // Indoor close/mid portrait: subtle natural studio ambient falloff preserving organic hair separation
+                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.42f else 0.34f
                 adjustments.add("Fundo estúdio sutil + bokeh f/1.4")
             } else {
                 adjustments.add("Bokeh ótico f/1.4 + separação de fundo")
             }
+        } else if (!hasSky && (hasUrban || hasFood || !hasPerson || faceCount == 0 || subjectRatio < 0.22f)) {
+            // Environmental / wide / multi-depth scenes stay tack-sharp edge-to-edge (Leica 35mm f/2 look)
+            bgBokeh = 0.0f
+            studioBackdrop = 0.0f
+            clarity = max(clarity, 0.22f)
+            adjustments.add("Plano amplo nítido (35mm f/2.0 · zero blur no fundo)")
         }
 
         if (hasPerson) {

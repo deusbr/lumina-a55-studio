@@ -11,8 +11,8 @@ android {
         applicationId = "dev.deusbr.luminaa55"
         minSdk = 33
         targetSdk = 34
-        versionCode = 10
-        versionName = "4.0.0"
+        versionCode = 11
+        versionName = "4.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
