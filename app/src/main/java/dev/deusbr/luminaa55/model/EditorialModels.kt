@@ -42,7 +42,7 @@ enum class CaptureMode(
     val label: String,
     val description: String
 ) {
-    EDITORIAL_BURST("Estúdio Full-Res", "Sensor em resolução máxima + limpeza de sombra"),
+    EDITORIAL_BURST("Estúdio Neural", "ISP + Rede Neural Zero-DCE + Profundidade 3D"),
     SAMSUNG_HDR("Samsung HDR", "Extensão nativa CameraX HDR do A55"),
     SAMSUNG_NIGHT("Samsung Night", "Extensão nativa noturna do ISP Exynos"),
     SAMSUNG_BOKEH("Samsung Bokeh", "Extensão nativa de retrato")
@@ -92,6 +92,17 @@ data class PhotometricStats(
     val lightDirection: LightDirection
 )
 
+data class StudioLightingHint(
+    val hasFace: Boolean = false,
+    val faceCenterX: Float = 0.5f,
+    val faceCenterY: Float = 0.45f,
+    val faceRadius: Float = 0.18f,
+    val leftEyeX: Float = -1f,
+    val leftEyeY: Float = -1f,
+    val rightEyeX: Float = -1f,
+    val rightEyeY: Float = -1f
+)
+
 data class EditRecipe(
     val filmStock: FilmStock,
     val exposureOffset: Float,
@@ -121,6 +132,8 @@ data class SceneConcept(
     val faceCount: Int,
     val subjectRatio: Float,
     val hasConfidentMask: Boolean = true,
+    val hasDepthMap: Boolean = false,
+    val neuralBoostStrength: Float = 0.45f,
     val lighting: LightDirection,
     val recommendedStock: FilmStock,
     val recommendedBurstCount: Int = 3,
@@ -136,13 +149,18 @@ data class AutoLiveDecision(
 )
 
 data class CapturedPhotoSession(
+    val id: Long = System.nanoTime(),
     val originalBitmap: Bitmap,
     val previewOriginalBitmap: Bitmap,
     val subjectMaskBitmap: Bitmap?,
+    val depthMapBitmap: Bitmap? = null,
+    val neuralGainBitmap: Bitmap? = null,
+    val lightingHint: StudioLightingHint = StudioLightingHint(),
     val processedBitmap: Bitmap,
     val previewProcessedBitmap: Bitmap,
     val exifBytes: ByteArray? = null,
     val concept: SceneConcept,
+    val aiModelsUsed: List<String> = emptyList(),
     val burstFramesMerged: Int,
     val gpuAccelerated: Boolean,
     val processingTimeMs: Long,

@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -56,6 +57,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -409,7 +412,7 @@ fun CameraScreen(
                 }
             }
 
-            // Primary Shutter Row (>= 48dp touch targets)
+            // Primary Shutter Row (Live Studio Thumbnail + Non-Blocking Shutter + Front Switch)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -417,18 +420,69 @@ fun CameraScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = { galleryLauncher.launch("image/*") },
-                    modifier = Modifier
-                        .size(50.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(LuminaColors.ElevatedSurface)
-                        .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(14.dp))
-                ) {
-                    Icon(Icons.Default.PhotoLibrary, contentDescription = "Abrir da galeria", tint = LuminaColors.InkPrimary)
+                val latestSession = state.studioSessions.firstOrNull()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(LuminaColors.ElevatedSurface)
+                            .border(
+                                1.5.dp,
+                                if (state.pendingQueueCount > 0) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable {
+                                if (latestSession != null) viewModel.openStudioReview(latestSession)
+                                else galleryLauncher.launch("image/*")
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (latestSession != null) {
+                            Image(
+                                bitmap = remember(latestSession.previewProcessedBitmap) {
+                                    latestSession.previewProcessedBitmap.asImageBitmap()
+                                },
+                                contentDescription = "Abrir ensaio recente",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            val badgeText = if (state.pendingQueueCount > 0) "⏳${state.pendingQueueCount}" else "${state.studioSessions.size}"
+                            Text(
+                                text = badgeText,
+                                color = LuminaColors.VoidBg,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(3.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (state.pendingQueueCount > 0) LuminaColors.OpticalAmber else LuminaColors.StudioEmerald)
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        } else if (state.pendingQueueCount > 0) {
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp), color = LuminaColors.OpticalAmber, strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = "Abrir da galeria", tint = LuminaColors.InkPrimary)
+                        }
+                    }
+
+                    if (latestSession != null) {
+                        IconButton(
+                            onClick = { galleryLauncher.launch("image/*") },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(LuminaColors.ElevatedSurface)
+                                .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
+                        ) {
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = "Importar foto", tint = LuminaColors.InkSecondary, modifier = Modifier.size(18.dp))
+                        }
+                    }
                 }
 
-                // Dual-Ring Tactile Precision Shutter
+                // Dual-Ring Non-Blocking Tactile Precision Shutter
                 Box(
                     modifier = Modifier
                         .size(78.dp)
@@ -440,11 +494,11 @@ fun CameraScreen(
                         )
                         .padding(6.dp)
                         .clip(CircleShape)
-                        .background(if (state.isCapturing) LuminaColors.ShutterCrimson else LuminaColors.InkPrimary)
-                        .clickable(enabled = !state.isCapturing) { viewModel.captureEditorialPhoto() },
+                        .background(if (state.isShutterBusy) LuminaColors.ShutterCrimson else LuminaColors.InkPrimary)
+                        .clickable(enabled = !state.isShutterBusy) { viewModel.captureEditorialPhoto() },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (state.isCapturing) {
+                    if (state.isShutterBusy) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(28.dp),
                             color = LuminaColors.InkPrimary,

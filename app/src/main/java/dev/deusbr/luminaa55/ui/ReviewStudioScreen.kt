@@ -165,6 +165,39 @@ fun ReviewStudioScreen(
             }
         }
 
+        // Lighttable Filmstrip when multiple shots were captured in this session
+        if (state.studioSessions.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                state.studioSessions.forEachIndexed { idx, sItem ->
+                    val current = sItem.id == session.id
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(
+                                if (current) 2.dp else 1.dp,
+                                if (current) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { viewModel.openStudioReview(sItem) }
+                    ) {
+                        Image(
+                            bitmap = remember(sItem.previewProcessedBitmap) { sItem.previewProcessedBitmap.asImageBitmap() },
+                            contentDescription = "Foto ${idx + 1}",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+            }
+        }
+
         // Exact 1:1 Aligned Split Lighttable Viewer
         BoxWithConstraints(
             modifier = Modifier
@@ -327,7 +360,7 @@ fun ReviewStudioScreen(
                     fontSize = 12.sp
                 )
                 Text(
-                    text = "Luz: ${session.concept.lighting.labelPt} · Rostos: ${session.concept.faceCount} · Cena: ${session.concept.detectedTags.ifEmpty { listOf("Geral") }.joinToString()}",
+                    text = "Luz: ${session.concept.lighting.labelPt} · Rostos: ${session.concept.faceCount} · IA: ${session.aiModelsUsed.ifEmpty { listOf("Estúdio") }.joinToString(" + ")}",
                     color = LuminaColors.InkSecondary,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp

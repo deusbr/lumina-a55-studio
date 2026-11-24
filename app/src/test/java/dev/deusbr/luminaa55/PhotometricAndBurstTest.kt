@@ -1,6 +1,7 @@
 package dev.deusbr.luminaa55
 
 import dev.deusbr.luminaa55.camera.MultiFrameBurstProcessor
+import dev.deusbr.luminaa55.context.NeuralStudioEngine
 import dev.deusbr.luminaa55.context.PhotometricAnalyzer
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.LightDirection
@@ -148,5 +149,35 @@ class PhotometricAndBurstTest {
             stats = dayStats, labels = listOf("Landscape"), faceCount = 0, subjectRatio = 1f, hasConfidentMask = false
         )
         assertEquals(1, dayConcept.recommendedBurstCount)
+    }
+
+    @Test
+    fun midasDepthCocKeepsForegroundZeroBlurAndBlursDistantBackground() {
+        val w = 16
+        val h = 16
+        val rawInvDepth = FloatArray(w * h)
+        val fgMask = FloatArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                val isSubject = x in 5..10 && y in 4..12
+                // Inverse depth: near subject = 10f, far wall = 1f
+                rawInvDepth[i] = if (isSubject) 10f else 1f
+                fgMask[i] = if (isSubject) 0.95f else 0.05f
+            }
+        }
+        val coc = NeuralStudioEngine.computeDepthCocWeights(rawInvDepth, fgMask, w, h)
+        assertEquals(0f, coc.cocBlur[8 * w + 8], 0.001f)
+        assertTrue("Distant background CoC (${coc.cocBlur[0]}) must be > 0.8", coc.cocBlur[0] > 0.8f)
+    }
+
+    @Test
+    fun zeroDceGainEncodingBoostsLowLightAndPreservesNeutral() {
+        val neutralByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.5f, enhancedVal = 0.5f, mixStrength = 0.5f)
+        // gain=1.0 -> (1.0 - 0.5) / 2.0 = 0.25 -> ~63..64
+        assertTrue("Neutral gain byte expected near 63..64, got $neutralByte", neutralByte in 62..65)
+
+        val liftedByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.15f, enhancedVal = 0.30f, mixStrength = 0.78f)
+        assertTrue("Low-light lifted gain byte ($liftedByte) must exceed neutral ($neutralByte)", liftedByte > neutralByte + 30)
     }
 }

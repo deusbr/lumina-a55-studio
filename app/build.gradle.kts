@@ -11,9 +11,13 @@ android {
         applicationId = "dev.deusbr.luminaa55"
         minSdk = 33
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.1.1"
+        versionCode = 5
+        versionName = "2.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    androidResources {
+        noCompress += listOf("tflite", "lite")
     }
 
     buildTypes {
@@ -83,7 +87,10 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.camera:camera-extensions:$cameraxVersion")
 
-    // Offline On-Device Vision (Bundled Face + Labeling + Selfie Seg + Subject Seg)
+    // Bundled Local Neural AI Engine (Zero-DCE + MiDaS Depth + MediaPipe Multi-Class Seg)
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+
+    // Offline On-Device Vision (Bundled Face Landmarks + Labeling + Portrait Seg)
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mlkit:image-labeling:17.0.9")
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")

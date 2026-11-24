@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
 import dev.deusbr.luminaa55.camera.CameraController
+import dev.deusbr.luminaa55.camera.RawCaptureOutput
 import dev.deusbr.luminaa55.context.PhotometricAnalyzer
 import dev.deusbr.luminaa55.context.SceneConceptEngine
 import dev.deusbr.luminaa55.model.AutoLiveDecision
@@ -21,10 +22,13 @@ import dev.deusbr.luminaa55.model.ProDeckTab
 import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -43,60 +47,178 @@ data class LuminaUiState(
     val showGrid: Boolean = true,
     val showDiagnostics: Boolean = false,
     val autoDecision: AutoLiveDecision = AutoLiveDecision(
-        headline = "Modo Automático Contextual",
-        subtitle = "Analisando luz e cena em tempo real…",
+        headline = "Modo Automático · IA Local",
+        subtitle = "Analisando cena e profundidade…",
         recommendedStock = FilmStock.PORTRA_400,
         recommendedBurst = 3
     ),
-    val isCapturing: Boolean = false,
+    val isShutterBusy: Boolean = false,
+    val pendingQueueCount: Int = 0,
     val isSaving: Boolean = false,
     val statusMessage: String? = null,
     val hardwareProfile: CameraHardwareProfile? = null,
+    val studioSessions: List<CapturedPhotoSession> = emptyList(),
     val activeSession: CapturedPhotoSession? = null,
     val editIntensity: Float = 1.0f
+)
+
+private data class QueuedShot(
+    val raw: RawCaptureOutput,
+    val stock: FilmStock,
+    val lens: LensOption,
+    val isPro: Boolean,
+    val manualBurstCount: Int,
+    val captureMode: CaptureMode
 )
 
 class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     val cameraController = CameraController(app)
-    private val conceptEngine = SceneConceptEngine()
+    private val conceptEngine = SceneConceptEngine(app)
+    private val processingQueue = Channel<QueuedShot>(Channel.UNLIMITED)
     private var reprocessJob: Job? = null
+    private var hintSamplerJob: Job? = null
 
     private val _uiState = MutableStateFlow(LuminaUiState())
     val uiState: StateFlow<LuminaUiState> = _uiState.asStateFlow()
 
     init {
-        conceptEngine.warmUp(app)
+        viewModelScope.launch(Dispatchers.Default) {
+            conceptEngine.warmUp()
+        }
+        startBackgroundStudioWorker()
+    }
+
+    private fun startBackgroundStudioWorker() {
+        viewModelScope.launch(Dispatchers.Default) {
+            for (job in processingQueue) {
+                runCatching {
+                    processQueuedShot(job)
+                }.onFailure { err ->
+                    _uiState.update {
+                        it.copy(statusMessage = "Erro na fila IA: ${err.message}")
+                    }
+                }
+                _uiState.update {
+                    it.copy(pendingQueueCount = (it.pendingQueueCount - 1).coerceAtLeast(0))
+                }
+            }
+        }
+    }
+
+    private suspend fun processQueuedShot(job: QueuedShot) {
+        val startMs = System.currentTimeMillis()
+        val analysis = conceptEngine.analyze(job.raw.fullResBitmap, job.stock)
+        val denoiseLevel = if (!job.isPro) {
+            analysis.concept.recommendedBurstCount
+        } else if (job.captureMode == CaptureMode.EDITORIAL_BURST) {
+            job.manualBurstCount
+        } else {
+            1
+        }
+
+        val (denoisedFullRes, framesUsed) = cameraController.applyFullResDenoiseIfRequested(
+            job.raw.fullResBitmap,
+            denoiseLevel
+        )
+        if (denoisedFullRes !== job.raw.fullResBitmap) {
+            job.raw.fullResBitmap.recycle()
+        }
+
+        val renderedFullRes = EditorialShaderEngine.renderEditorial(
+            source = denoisedFullRes,
+            subjectMask = analysis.subjectMask,
+            depthMap = analysis.depthMap,
+            neuralGainMap = analysis.neuralGainMap,
+            lightingHint = analysis.lightingHint,
+            recipe = analysis.concept.recipe,
+            intensity = 1.0f,
+            hasConfidentMask = analysis.hasConfidentMask
+        )
+
+        val uiOrigPreview = cameraController.createUiPreviewBitmap(denoisedFullRes, 1800)
+        val uiProcPreview = cameraController.createUiPreviewBitmap(renderedFullRes.bitmap, 1800)
+
+        val savedUri = runCatching {
+            cameraController.saveBitmapToGallery(renderedFullRes.bitmap, job.raw.exifBytes, analysis.concept.conceptTitle)
+        }.getOrNull()
+
+        val session = CapturedPhotoSession(
+            originalBitmap = denoisedFullRes,
+            previewOriginalBitmap = uiOrigPreview,
+            subjectMaskBitmap = analysis.subjectMask,
+            depthMapBitmap = analysis.depthMap,
+            neuralGainBitmap = analysis.neuralGainMap,
+            lightingHint = analysis.lightingHint,
+            processedBitmap = renderedFullRes.bitmap,
+            previewProcessedBitmap = uiProcPreview,
+            exifBytes = job.raw.exifBytes,
+            concept = analysis.concept,
+            aiModelsUsed = analysis.aiModelsUsed,
+            burstFramesMerged = framesUsed,
+            gpuAccelerated = renderedFullRes.gpuAccelerated,
+            processingTimeMs = System.currentTimeMillis() - startMs,
+            lensUsed = job.lens,
+            capturedFromProMode = job.isPro,
+            savedUriString = savedUri?.toString(),
+            fullResMatchesCurrentRecipe = true,
+            cachedStats = analysis.stats,
+            cachedLabels = analysis.labels,
+            cachedFaceCount = analysis.faceCount,
+            hasConfidentMask = analysis.hasConfidentMask
+        )
+
+        _uiState.update { cur ->
+            val updatedList = (listOf(session) + cur.studioSessions).take(10)
+            cur.copy(
+                studioSessions = updatedList,
+                statusMessage = if (savedUri != null) {
+                    "Salva na galeria (${renderedFullRes.bitmap.width}×${renderedFullRes.bitmap.height})"
+                } else {
+                    "Processada (${renderedFullRes.bitmap.width}×${renderedFullRes.bitmap.height})"
+                }
+            )
+        }
     }
 
     fun bindCamera(owner: LifecycleOwner, previewView: PreviewView) {
         viewModelScope.launch {
             val s = _uiState.value
-            val effectiveMode = if (s.experienceMode == CameraExperienceMode.NORMAL) {
-                CaptureMode.EDITORIAL_BURST
-            } else {
-                s.captureMode
-            }
+            val isNormal = s.experienceMode == CameraExperienceMode.NORMAL
+            val effectiveMode = if (isNormal) CaptureMode.EDITORIAL_BURST else s.captureMode
             runCatching {
                 cameraController.bindCamera(
                     lifecycleOwner = owner,
                     previewView = previewView,
                     lens = s.activeLens,
                     captureMode = effectiveMode,
-                    onLiveFrameForHint = { frame ->
-                        viewModelScope.launch {
-                            val decision = runCatching { conceptEngine.quickLiveHint(frame) }.getOrNull()
-                            frame.recycle()
-                            if (decision != null) {
-                                _uiState.update { it.copy(autoDecision = decision) }
-                            }
-                        }
-                    }
+                    preferAutoExtension = isNormal
                 )
             }.onSuccess {
                 _uiState.update { it.copy(hardwareProfile = cameraController.hardwareProfile, statusMessage = null) }
+                startLiveHintLoop(previewView)
             }.onFailure { err ->
                 _uiState.update { it.copy(statusMessage = "Erro ao iniciar câmera: ${err.message}") }
+            }
+        }
+    }
+
+    private fun startLiveHintLoop(previewView: PreviewView) {
+        hintSamplerJob?.cancel()
+        hintSamplerJob = viewModelScope.launch {
+            while (isActive) {
+                delay(1150L)
+                if (_uiState.value.activeSession != null) continue
+                val snap: Bitmap? = withContext(Dispatchers.Main) {
+                    runCatching { previewView.bitmap }.getOrNull()
+                }
+                if (snap != null) {
+                    val decision = runCatching { conceptEngine.quickLiveHint(snap) }.getOrNull()
+                    snap.recycle()
+                    if (decision != null) {
+                        _uiState.update { it.copy(autoDecision = decision) }
+                    }
+                }
             }
         }
     }
@@ -106,7 +228,6 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         if (prev.experienceMode == mode) return
 
         if (mode == CameraExperienceMode.NORMAL) {
-            val neededRebind = prev.captureMode != CaptureMode.EDITORIAL_BURST
             cameraController.applyManualIsoShutter(null, null)
             cameraController.setExposureIndex(0)
             _uiState.update {
@@ -119,9 +240,10 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     sessionLookLocked = false
                 )
             }
-            if (neededRebind) bindCamera(owner, previewView)
+            bindCamera(owner, previewView)
         } else {
             _uiState.update { it.copy(experienceMode = CameraExperienceMode.PRO) }
+            bindCamera(owner, previewView)
         }
     }
 
@@ -190,94 +312,54 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         else cameraController.applyManualIsoShutter(null, null)
     }
 
+    /**
+     * Non-blocking shutter: takes raw frame (~0.35s), IMMEDIATELY unlocks shutter for next photo,
+     * and pushes enhancement + auto-save into background neural queue.
+     */
     fun captureEditorialPhoto() {
         val state = _uiState.value
-        if (state.isCapturing) return
+        if (state.isShutterBusy) return
         val isPro = state.experienceMode == CameraExperienceMode.PRO
 
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isCapturing = true,
-                    statusMessage = if (isPro) "Capturando em resolução máxima…" else "Analisando cena e otimizando foto…"
-                )
-            }
-            val startMs = System.currentTimeMillis()
+            _uiState.update { it.copy(isShutterBusy = true) }
             runCatching {
-                val rawCapture = cameraController.captureFullRes()
-                val effectiveStock = if (!isPro) {
-                    FilmStock.AUTO_EDITORIAL
-                } else if (state.sessionLookLocked && state.selectedStock != FilmStock.AUTO_EDITORIAL) {
-                    state.selectedStock
-                } else {
-                    state.selectedStock
-                }
-
-                val analysis = conceptEngine.analyze(rawCapture.fullResBitmap, effectiveStock)
-                val denoiseLevel = if (!isPro) {
-                    analysis.concept.recommendedBurstCount
-                } else if (state.captureMode == CaptureMode.EDITORIAL_BURST) {
-                    state.burstCount
-                } else {
-                    1
-                }
-
-                val (denoisedFullRes, framesUsed) = cameraController.applyFullResDenoiseIfRequested(
-                    rawCapture.fullResBitmap,
-                    denoiseLevel
-                )
-                if (denoisedFullRes !== rawCapture.fullResBitmap) {
-                    rawCapture.fullResBitmap.recycle()
-                }
-
-                val renderedFullRes = withContext(Dispatchers.Default) {
-                    EditorialShaderEngine.renderEditorial(
-                        source = denoisedFullRes,
-                        subjectMask = analysis.subjectMask,
-                        recipe = analysis.concept.recipe,
-                        intensity = 1.0f,
-                        hasConfidentMask = analysis.hasConfidentMask
-                    )
-                }
-
-                val uiOrigPreview = withContext(Dispatchers.Default) {
-                    cameraController.createUiPreviewBitmap(denoisedFullRes, 1800)
-                }
-                val uiProcPreview = withContext(Dispatchers.Default) {
-                    cameraController.createUiPreviewBitmap(renderedFullRes.bitmap, 1800)
-                }
-
-                CapturedPhotoSession(
-                    originalBitmap = denoisedFullRes,
-                    previewOriginalBitmap = uiOrigPreview,
-                    subjectMaskBitmap = analysis.subjectMask,
-                    processedBitmap = renderedFullRes.bitmap,
-                    previewProcessedBitmap = uiProcPreview,
-                    exifBytes = rawCapture.exifBytes,
-                    concept = analysis.concept,
-                    burstFramesMerged = framesUsed,
-                    gpuAccelerated = renderedFullRes.gpuAccelerated,
-                    processingTimeMs = System.currentTimeMillis() - startMs,
-                    lensUsed = state.activeLens,
-                    capturedFromProMode = isPro,
-                    fullResMatchesCurrentRecipe = true,
-                    cachedStats = analysis.stats,
-                    cachedLabels = analysis.labels,
-                    cachedFaceCount = analysis.faceCount,
-                    hasConfidentMask = analysis.hasConfidentMask
-                )
-            }.onSuccess { session ->
+                cameraController.captureFullRes()
+            }.onSuccess { raw ->
+                val effectiveStock = if (!isPro) FilmStock.AUTO_EDITORIAL else state.selectedStock
                 _uiState.update {
                     it.copy(
-                        isCapturing = false,
-                        activeSession = session,
-                        editIntensity = 1.0f,
-                        statusMessage = null
+                        isShutterBusy = false,
+                        pendingQueueCount = it.pendingQueueCount + 1,
+                        statusMessage = "Ensaio em fila (${it.pendingQueueCount + 1}) — pronto para outro clique!"
                     )
                 }
+                processingQueue.trySend(
+                    QueuedShot(
+                        raw = raw,
+                        stock = effectiveStock,
+                        lens = state.activeLens,
+                        isPro = isPro,
+                        manualBurstCount = state.burstCount,
+                        captureMode = state.captureMode
+                    )
+                )
             }.onFailure { err ->
-                _uiState.update { it.copy(isCapturing = false, statusMessage = "Falha na captura: ${err.message}") }
+                _uiState.update {
+                    it.copy(isShutterBusy = false, statusMessage = "Falha na captura: ${err.message}")
+                }
             }
+        }
+    }
+
+    fun openStudioReview(session: CapturedPhotoSession? = _uiState.value.studioSessions.firstOrNull()) {
+        if (session == null) return
+        _uiState.update {
+            it.copy(
+                activeSession = session,
+                selectedStock = if (it.experienceMode == CameraExperienceMode.PRO) session.concept.recommendedStock else it.selectedStock,
+                editIntensity = 1.0f
+            )
         }
     }
 
@@ -285,7 +367,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         val state = _uiState.value
         val isPro = state.experienceMode == CameraExperienceMode.PRO
         viewModelScope.launch {
-            _uiState.update { it.copy(isCapturing = true, statusMessage = "Abrindo em resolução original…") }
+            _uiState.update { it.copy(statusMessage = "Processando foto da galeria com IA local…") }
             val startMs = System.currentTimeMillis()
             runCatching {
                 val (fullBmp, exifBytes) = withContext(Dispatchers.IO) {
@@ -297,6 +379,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     EditorialShaderEngine.renderEditorial(
                         source = fullBmp,
                         subjectMask = analysis.subjectMask,
+                        depthMap = analysis.depthMap,
+                        neuralGainMap = analysis.neuralGainMap,
+                        lightingHint = analysis.lightingHint,
                         recipe = analysis.concept.recipe,
                         intensity = 1.0f,
                         hasConfidentMask = analysis.hasConfidentMask
@@ -313,10 +398,14 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     originalBitmap = fullBmp,
                     previewOriginalBitmap = uiOrigPreview,
                     subjectMaskBitmap = analysis.subjectMask,
+                    depthMapBitmap = analysis.depthMap,
+                    neuralGainBitmap = analysis.neuralGainMap,
+                    lightingHint = analysis.lightingHint,
                     processedBitmap = renderedFullRes.bitmap,
                     previewProcessedBitmap = uiProcPreview,
                     exifBytes = exifBytes,
                     concept = analysis.concept,
+                    aiModelsUsed = analysis.aiModelsUsed,
                     burstFramesMerged = 1,
                     gpuAccelerated = renderedFullRes.gpuAccelerated,
                     processingTimeMs = System.currentTimeMillis() - startMs,
@@ -329,9 +418,17 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     hasConfidentMask = analysis.hasConfidentMask
                 )
             }.onSuccess { session ->
-                _uiState.update { it.copy(isCapturing = false, activeSession = session, editIntensity = 1.0f, statusMessage = null) }
+                _uiState.update { cur ->
+                    val updatedList = (listOf(session) + cur.studioSessions).take(10)
+                    cur.copy(
+                        studioSessions = updatedList,
+                        activeSession = session,
+                        editIntensity = 1.0f,
+                        statusMessage = null
+                    )
+                }
             }.onFailure { err ->
-                _uiState.update { it.copy(isCapturing = false, statusMessage = "Erro ao abrir foto: ${err.message}") }
+                _uiState.update { it.copy(statusMessage = "Erro ao abrir foto: ${err.message}") }
             }
         }
     }
@@ -350,7 +447,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         reprocessJob = viewModelScope.launch {
             val startMs = System.currentTimeMillis()
             val stats = session.cachedStats
-            val mask = session.subjectMaskBitmap ?: return@launch
+            val mask = session.subjectMaskBitmap
             val updatedConcept = if (stats != null) {
                 PhotometricAnalyzer.buildConceptProfile(
                     stats = stats,
@@ -370,13 +467,15 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                 backgroundBokeh = customBokeh ?: baseRecipe.backgroundBokeh,
                 grainAmount = customGrain ?: baseRecipe.grainAmount
             )
-            val allowMask = session.hasConfidentMask || (customBokeh != null && customBokeh > 0.01f && mask.width > 16)
+            val allowMask = session.hasConfidentMask || (customBokeh != null && customBokeh > 0.01f && (mask?.width ?: 0) > 16)
 
-            // Instant live preview on display-resolution proxy
             val renderedPreview = withContext(Dispatchers.Default) {
                 EditorialShaderEngine.renderEditorial(
                     source = session.previewOriginalBitmap,
                     subjectMask = mask,
+                    depthMap = session.depthMapBitmap,
+                    neuralGainMap = session.neuralGainBitmap,
+                    lightingHint = session.lightingHint,
                     recipe = tunedRecipe,
                     intensity = intensity,
                     hasConfidentMask = allowMask
@@ -384,15 +483,17 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             }
             _uiState.update { cur ->
                 val curSession = cur.activeSession ?: return@update cur
+                val nextSession = curSession.copy(
+                    previewProcessedBitmap = renderedPreview.bitmap,
+                    concept = updatedConcept.copy(recipe = tunedRecipe),
+                    gpuAccelerated = renderedPreview.gpuAccelerated,
+                    processingTimeMs = System.currentTimeMillis() - startMs,
+                    fullResMatchesCurrentRecipe = false,
+                    savedUriString = null
+                )
                 cur.copy(
-                    activeSession = curSession.copy(
-                        previewProcessedBitmap = renderedPreview.bitmap,
-                        concept = updatedConcept.copy(recipe = tunedRecipe),
-                        gpuAccelerated = renderedPreview.gpuAccelerated,
-                        processingTimeMs = System.currentTimeMillis() - startMs,
-                        fullResMatchesCurrentRecipe = false,
-                        savedUriString = null
-                    )
+                    activeSession = nextSession,
+                    studioSessions = cur.studioSessions.map { if (it.id == nextSession.id) nextSession else it }
                 )
             }
         }
@@ -410,19 +511,18 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     session.processedBitmap
                 } else {
                     val mask = session.subjectMaskBitmap
-                    if (mask != null) {
-                        val allowMask = session.hasConfidentMask || (session.concept.recipe.backgroundBokeh > 0.01f && mask.width > 16)
-                        withContext(Dispatchers.Default) {
-                            EditorialShaderEngine.renderEditorial(
-                                source = session.originalBitmap,
-                                subjectMask = mask,
-                                recipe = session.concept.recipe,
-                                intensity = intensity,
-                                hasConfidentMask = allowMask
-                            ).bitmap
-                        }
-                    } else {
-                        session.processedBitmap
+                    val allowMask = session.hasConfidentMask || (session.concept.recipe.backgroundBokeh > 0.01f && (mask?.width ?: 0) > 16)
+                    withContext(Dispatchers.Default) {
+                        EditorialShaderEngine.renderEditorial(
+                            source = session.originalBitmap,
+                            subjectMask = mask,
+                            depthMap = session.depthMapBitmap,
+                            neuralGainMap = session.neuralGainBitmap,
+                            lightingHint = session.lightingHint,
+                            recipe = session.concept.recipe,
+                            intensity = intensity,
+                            hasConfidentMask = allowMask
+                        ).bitmap
                     }
                 }
                 val uri = cameraController.saveBitmapToGallery(exportBmp, session.exifBytes, session.concept.conceptTitle)
@@ -430,13 +530,15 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             }.onSuccess { (finalFullBmp, uri) ->
                 _uiState.update { cur ->
                     val s = cur.activeSession ?: return@update cur
+                    val updated = s.copy(
+                        processedBitmap = finalFullBmp,
+                        fullResMatchesCurrentRecipe = true,
+                        savedUriString = uri.toString()
+                    )
                     cur.copy(
                         isSaving = false,
-                        activeSession = s.copy(
-                            processedBitmap = finalFullBmp,
-                            fullResMatchesCurrentRecipe = true,
-                            savedUriString = uri.toString()
-                        ),
+                        activeSession = updated,
+                        studioSessions = cur.studioSessions.map { if (it.id == updated.id) updated else it },
                         statusMessage = "Salva em Pictures/LuminaA55 (${finalFullBmp.width}×${finalFullBmp.height})"
                     )
                 }
@@ -453,6 +555,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        hintSamplerJob?.cancel()
+        processingQueue.close()
         cameraController.release()
         conceptEngine.close()
     }

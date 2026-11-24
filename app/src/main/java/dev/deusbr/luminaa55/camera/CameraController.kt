@@ -18,7 +18,6 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -61,24 +60,23 @@ class CameraController(private val context: Context) {
     private var extensionsManager: ExtensionsManager? = null
     private var activeCamera: Camera? = null
     private var imageCapture: ImageCapture? = null
-    private var imageAnalysis: ImageAnalysis? = null
 
-    private val captureExecutor = Executors.newSingleThreadExecutor()
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private val captureExecutor = Executors.newFixedThreadPool(2)
 
     var hardwareProfile: CameraHardwareProfile? = null
         private set
 
-    @Volatile
-    private var lastHintTimestampMs = 0L
-
+    /**
+     * Binds Preview + ImageCapture cleanly (omitting ImageAnalysis when vendor extensions run,
+     * because Samsung One UI Extensions reject concurrent ImageAnalysis use cases).
+     */
     @OptIn(ExperimentalCamera2Interop::class)
     suspend fun bindCamera(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
         lens: LensOption,
         captureMode: CaptureMode,
-        onLiveFrameForHint: (Bitmap) -> Unit
+        preferAutoExtension: Boolean
     ) {
         val provider = cameraProvider ?: ProcessCameraProvider.getInstance(context).awaitListenable(context)
             .also { cameraProvider = it }
@@ -92,7 +90,7 @@ class CameraController(private val context: Context) {
         }
 
         val baseSelector = buildSelectorForLens(lens, hardwareProfile)
-        val finalSelector = resolveExtensionSelector(baseSelector, captureMode, extMgr)
+        val finalSelector = resolveExtensionSelector(baseSelector, captureMode, preferAutoExtension, extMgr)
 
         val preview = Preview.Builder()
             .setResolutionSelector(
@@ -112,7 +110,6 @@ class CameraController(private val context: Context) {
                     .build()
             )
 
-        // Request maximum ISP quality (demosaic, noise reduction, edge sharpness, aberration correction)
         runCatching {
             Camera2Interop.Extender(captureBuilder)
                 .setCaptureRequestOption(CaptureRequest.JPEG_QUALITY, 100.toByte())
@@ -125,31 +122,17 @@ class CameraController(private val context: Context) {
         }
         val capture = captureBuilder.build()
 
-        val analysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-            .build()
-
-        analysis.setAnalyzer(analysisExecutor) { proxy ->
-            try {
-                val now = System.currentTimeMillis()
-                if (now - lastHintTimestampMs > 1150L) {
-                    lastHintTimestampMs = now
-                    val bmp = MultiFrameBurstProcessor.imageProxyToBitmap(proxy)
-                    onLiveFrameForHint(bmp)
-                }
-            } catch (_: Throwable) {
-            } finally {
-                proxy.close()
-            }
-        }
-
         withContext(Dispatchers.Main) {
             provider.unbindAll()
-            val cam = provider.bindToLifecycle(lifecycleOwner, finalSelector, preview, capture, analysis)
+            val cam = try {
+                provider.bindToLifecycle(lifecycleOwner, finalSelector, preview, capture)
+            } catch (_: Throwable) {
+                // Safe fallback to base selector if vendor extension rejects specific lens
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, baseSelector, preview, capture)
+            }
             activeCamera = cam
             imageCapture = capture
-            imageAnalysis = analysis
 
             val zoomState = cam.cameraInfo.zoomState.value
             val minZ = zoomState?.minZoomRatio ?: 0.5f
@@ -187,18 +170,23 @@ class CameraController(private val context: Context) {
     private fun resolveExtensionSelector(
         base: CameraSelector,
         mode: CaptureMode,
+        preferAutoExtension: Boolean,
         extMgr: ExtensionsManager?
     ): CameraSelector {
-        if (extMgr == null || mode == CaptureMode.EDITORIAL_BURST) return base
-        val extMode = when (mode) {
-            CaptureMode.SAMSUNG_HDR -> ExtensionMode.HDR
-            CaptureMode.SAMSUNG_NIGHT -> ExtensionMode.NIGHT
-            CaptureMode.SAMSUNG_BOKEH -> ExtensionMode.BOKEH
-            CaptureMode.EDITORIAL_BURST -> ExtensionMode.NONE
+        if (extMgr == null) return base
+        val extMode = when {
+            preferAutoExtension && mode == CaptureMode.EDITORIAL_BURST -> ExtensionMode.AUTO
+            mode == CaptureMode.SAMSUNG_HDR -> ExtensionMode.HDR
+            mode == CaptureMode.SAMSUNG_NIGHT -> ExtensionMode.NIGHT
+            mode == CaptureMode.SAMSUNG_BOKEH -> ExtensionMode.BOKEH
+            else -> ExtensionMode.NONE
         }
+        if (extMode == ExtensionMode.NONE) return base
         return runCatching {
             if (extMgr.isExtensionAvailable(base, extMode)) {
                 extMgr.getExtensionEnabledCameraSelector(base, extMode)
+            } else if (preferAutoExtension && extMgr.isExtensionAvailable(base, ExtensionMode.HDR)) {
+                extMgr.getExtensionEnabledCameraSelector(base, ExtensionMode.HDR)
             } else {
                 base
             }
@@ -247,10 +235,6 @@ class CameraController(private val context: Context) {
         return range.lower..range.upper
     }
 
-    /**
-     * Captures at 100% full sensor resolution (no 2560px downscale) and applies shadow chroma
-     * cleaning safely across strips when needed.
-     */
     suspend fun captureFullRes(): RawCaptureOutput {
         val cap = imageCapture ?: error("Câmera ainda não está pronta.")
         return suspendCancellableCoroutine { cont ->
@@ -273,10 +257,6 @@ class CameraController(private val context: Context) {
         }
     }
 
-    /**
-     * Applies edge-preserving shadow chroma cleanup row-by-row when context/mode calls for denoise
-     * without allocating duplicate multi-megabyte full-image arrays.
-     */
     suspend fun applyFullResDenoiseIfRequested(raw: Bitmap, burstStrength: Int): Pair<Bitmap, Int> {
         if (burstStrength <= 1) return raw to 1
         return withContext(Dispatchers.Default) {
@@ -288,7 +268,6 @@ class CameraController(private val context: Context) {
                 val cleaned = MultiFrameBurstProcessor.denoiseShadowChroma(px, w, h)
                 Bitmap.createBitmap(cleaned, w, h, Bitmap.Config.ARGB_8888) to burstStrength
             } else {
-                // Memory-safe strip denoise for 12MP / 32MP / 50MP photos
                 val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 val strip = 512
                 var y0 = 0
@@ -410,7 +389,6 @@ class CameraController(private val context: Context) {
             stream.write(buf.toByteArray())
         } ?: error("Falha ao gravar JPEG na galeria.")
 
-        // Preserve original camera EXIF metadata cleanly on the upright processed JPEG
         if (sourceExifBytes != null) {
             runCatching {
                 val srcExif = ExifInterface(ByteArrayInputStream(sourceExifBytes))
@@ -432,7 +410,7 @@ class CameraController(private val context: Context) {
                         srcExif.getAttribute(t)?.let { dstExif.setAttribute(t, it) }
                     }
                     dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v1.1 ($conceptTag)")
+                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v2.0 ($conceptTag)")
                     dstExif.saveAttributes()
                 }
             }
@@ -447,7 +425,6 @@ class CameraController(private val context: Context) {
     fun release() {
         runCatching { cameraProvider?.unbindAll() }
         captureExecutor.shutdownNow()
-        analysisExecutor.shutdownNow()
     }
 }
 
