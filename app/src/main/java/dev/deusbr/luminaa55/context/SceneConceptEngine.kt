@@ -163,16 +163,16 @@ class SceneConceptEngine(private val context: Context) {
             neuralMaps.hasConfidentSemantic && neuralMaps.semanticBitmap != null -> {
                 subjectSegBmp?.recycle()
                 selfieFallbackDeferred?.recycle()
-                smoothMaskEdges(neuralMaps.semanticBitmap)
+                smoothMaskEdges(upscaleSmoothMask(neuralMaps.semanticBitmap, 640))
             }
             subjectSegBmp != null -> {
                 neuralMaps.semanticBitmap?.recycle()
                 selfieFallbackDeferred?.recycle()
-                smoothMaskEdges(subjectSegBmp)
+                smoothMaskEdges(upscaleSmoothMask(subjectSegBmp, 640))
             }
             selfieFallbackDeferred != null -> {
                 neuralMaps.semanticBitmap?.recycle()
-                smoothMaskEdges(selfieFallbackDeferred)
+                smoothMaskEdges(upscaleSmoothMask(selfieFallbackDeferred, 640))
             }
             else -> {
                 neuralMaps.semanticBitmap?.recycle()
@@ -294,38 +294,86 @@ class SceneConceptEngine(private val context: Context) {
         return scaled
     }
 
+    private fun upscaleSmoothMask(src: Bitmap, targetMaxDim: Int): Bitmap {
+        val longEdge = max(src.width, src.height)
+        if (longEdge >= targetMaxDim) return src
+        val s = targetMaxDim.toFloat() / longEdge
+        val up = Bitmap.createScaledBitmap(
+            src,
+            max(16, (src.width * s).toInt()),
+            max(16, (src.height * s).toInt()),
+            true
+        )
+        if (up !== src) src.recycle()
+        return up
+    }
+
     private fun smoothMaskEdges(mask: Bitmap): Bitmap {
         val w = mask.width
         val h = mask.height
         val src = IntArray(w * h)
         mask.getPixels(src, 0, w, 0, 0, w, h)
         mask.recycle()
+
+        // 2-pass separable box blur (sigma ~ 4px at 640px -> ~14px silky optical feather on 3:4 portrait)
+        // Only feathers R (fgSubject) wide to eliminate 256px stair-step cutouts around curly hair/shoulders,
+        // while keeping G (skin) and B (hair/clothes detail) tighter so facial retouch stays sharp.
+        var rBuf = IntArray(w * h)
+        val gBuf = IntArray(w * h)
+        var bBuf = IntArray(w * h)
+        for (i in src.indices) {
+            val c = src[i]
+            rBuf[i] = (c ushr 16) and 0xFF
+            gBuf[i] = (c ushr 8) and 0xFF
+            bBuf[i] = c and 0xFF
+        }
+
+        rBuf = separableBoxBlur(rBuf, w, h, radius = 5)
+        rBuf = separableBoxBlur(rBuf, w, h, radius = 5)
+        bBuf = separableBoxBlur(bBuf, w, h, radius = 2)
+
         val dst = IntArray(w * h)
-        for (y in 0 until h) {
-            val y0 = maxOf(0, y - 1)
-            val y1 = minOf(h - 1, y + 1)
-            for (x in 0 until w) {
-                val x0 = maxOf(0, x - 1)
-                val x1 = minOf(w - 1, x + 1)
-                var sumR = 0; var sumG = 0; var sumB = 0
-                for (yy in y0..y1) {
-                    val row = yy * w
-                    for (xx in x0..x1) {
-                        val c = src[row + xx]
-                        sumR += (c ushr 16) and 0xFF
-                        sumG += (c ushr 8) and 0xFF
-                        sumB += c and 0xFF
-                    }
-                }
-                dst[y * w + x] = Color.argb(
-                    255,
-                    (sumR / 9).coerceIn(0, 255),
-                    (sumG / 9).coerceIn(0, 255),
-                    (sumB / 9).coerceIn(0, 255)
-                )
-            }
+        for (i in dst.indices) {
+            dst[i] = Color.argb(
+                255,
+                rBuf[i].coerceIn(0, 255),
+                gBuf[i].coerceIn(0, 255),
+                bBuf[i].coerceIn(0, 255)
+            )
         }
         return Bitmap.createBitmap(dst, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun separableBoxBlur(input: IntArray, w: Int, h: Int, radius: Int): IntArray {
+        val horiz = IntArray(w * h)
+        val win = radius * 2 + 1
+        for (y in 0 until h) {
+            val row = y * w
+            var sum = 0
+            for (k in -radius..radius) {
+                sum += input[row + k.coerceIn(0, w - 1)]
+            }
+            for (x in 0 until w) {
+                horiz[row + x] = sum / win
+                val addX = (x + radius + 1).coerceAtMost(w - 1)
+                val subX = (x - radius).coerceAtLeast(0)
+                sum += input[row + addX] - input[row + subX]
+            }
+        }
+        val out = IntArray(w * h)
+        for (x in 0 until w) {
+            var sum = 0
+            for (k in -radius..radius) {
+                sum += horiz[k.coerceIn(0, h - 1) * w + x]
+            }
+            for (y in 0 until h) {
+                out[y * w + x] = sum / win
+                val addY = (y + radius + 1).coerceAtMost(h - 1)
+                val subY = (y - radius).coerceAtLeast(0)
+                sum += horiz[addY * w + x] - horiz[subY * w + x]
+            }
+        }
+        return out
     }
 
     private fun buildNeutralForegroundMask(w: Int, h: Int): Bitmap {

@@ -240,24 +240,37 @@ object PhotometricAnalyzer {
             FilmStock.AUTO_EDITORIAL -> Unit
         }
 
-        // Context-driven adaptive adjustments (background blur/dimming ONLY when a real confident mask exists)
+        // Context-driven adaptive adjustments (3D Studio Relighting + Backdrop Cyclorama + Sky/Macro specialization)
+        val keySideSign = if (stats.rightLuma > stats.leftLuma + 0.03f) 1.0f else -1.0f
+        var relight3d = 0.0f
+        var studioBackdrop = 0.0f
+
         if (isBacklit && hasPerson) {
-            faceRelight += 0.26f
-            if (hasConfidentMask) bgDimming += 0.14f
+            faceRelight += 0.28f
+            relight3d = 0.78f
+            if (hasConfidentMask) bgDimming += 0.16f
             highlightRollOff = max(highlightRollOff, 0.50f)
-            adjustments.add("Relight facial em contraluz (+26%)")
-        } else if (hasPerson && stats.centerLuma < 0.42f) {
-            faceRelight += 0.16f
-            adjustments.add("Abertura seletiva de rosto (+16%)")
+            adjustments.add("Relight 3D facial em contraluz + Negative Fill")
+        } else if (hasPerson && stats.centerLuma < 0.44f) {
+            faceRelight += 0.18f
+            relight3d = 0.72f
+            adjustments.add("Softbox 3D 45° + Dodge & Burn ocular")
         } else if (hasPerson) {
-            faceRelight += 0.08f
-            adjustments.add("Key light de estúdio no rosto (+8%)")
+            faceRelight += 0.10f
+            relight3d = 0.65f
+            adjustments.add("Escultura 3D softbox + rim light")
         }
 
         if (hasConfidentMask && subjectRatio in 0.05f..0.90f && (hasPerson || hasPet || !hasSky)) {
-            bgBokeh = if (hasPerson) 0.92f else 0.65f
-            bgDimming = max(bgDimming, if (hasPerson) 0.28f else 0.14f)
-            adjustments.add("Bokeh ótico f/1.8 de estúdio + separação de fundo")
+            bgBokeh = if (hasPerson) 0.94f else 0.68f
+            bgDimming = max(bgDimming, if (hasPerson) 0.34f else 0.16f)
+            if (hasPerson && !hasSky && !hasPlant) {
+                // Indoor portrait: smooth charcoal radial studio cyclorama separation keeping natural hair edges
+                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.52f else 0.38f
+                adjustments.add("Ciclorama de estúdio + bokeh f/1.4")
+            } else {
+                adjustments.add("Bokeh ótico f/1.4 + separação de fundo")
+            }
         }
 
         if (hasPerson) {
@@ -265,20 +278,29 @@ object PhotometricAnalyzer {
         }
 
         if (hasSky || stats.highlightClipRatio > 0.06f) {
-            skyRecovery = 0.32f
-            highlightRollOff = max(highlightRollOff, 0.48f)
+            skyRecovery = if (hasSky && !hasPerson) 0.55f else 0.34f
+            highlightRollOff = max(highlightRollOff, 0.50f)
+            if (hasSky && !hasPerson) {
+                bgBokeh = 0.0f
+                studioBackdrop = 0.0f
+                relight3d = 0.15f
+                clarity = max(clarity, 0.22f)
+            }
             adjustments.add("Recuperação de altas luzes / céu (roll-off suave)")
         }
 
         if (hasFood || hasUrban || hasPet) {
-            clarity = max(clarity, 0.16f)
-            adjustments.add("Micro-contraste de textura seletivo")
+            clarity = max(clarity, 0.24f)
+            if (hasFood) saturation = max(saturation, 1.10f)
+            if (!hasPerson) relight3d = max(relight3d, 0.42f)
+            adjustments.add("Micro-contraste 3D de textura seletivo")
         }
 
         if (isNight) {
             exposureOffset += 0.06f
             shadowLift = 0.18f
-            halation = max(halation, 0.18f)
+            halation = max(halation, 0.24f)
+            if (!hasPerson) studioBackdrop = 0.0f
             adjustments.add("Halation noturna e controle de sombras")
         }
 
@@ -336,7 +358,10 @@ object PhotometricAnalyzer {
                 grainAmount = grain,
                 vignetteStrength = vignette,
                 monochrome = mono,
-                dehazeAmount = adaptiveDehaze
+                dehazeAmount = adaptiveDehaze,
+                relight3dStrength = relight3d,
+                studioBackdropStrength = studioBackdrop,
+                keyDirectionSign = keySideSign
             )
         )
     }

@@ -199,12 +199,106 @@ object MultiFrameBurstProcessor {
         if (bitmaps.size == 1) return bitmaps[0]
         val w = bitmaps[0].width
         val h = bitmaps[0].height
-        val arrays = bitmaps.map { bmp ->
-            val target = if (bmp.width == w && bmp.height == h) bmp else Bitmap.createScaledBitmap(bmp, w, h, true)
-            IntArray(w * h).also { target.getPixels(it, 0, w, 0, 0, w, h) }
+        val scaledFrames = bitmaps.map { bmp ->
+            if (bmp.width == w && bmp.height == h) bmp else Bitmap.createScaledBitmap(bmp, w, h, true)
         }
-        val merged = mergeArgbBurst(arrays, w, h, searchRadius = 4)
-        return Bitmap.createBitmap(merged, w, h, Bitmap.Config.ARGB_8888)
+        // Estimate alignment on fast 320px thumbnail to keep burst merge fast and memory-safe even at 32MP
+        val thumbScale = 320f / max(w, h).coerceAtLeast(1)
+        val tw = max(32, (w * thumbScale).toInt())
+        val th = max(32, (h * thumbScale).toInt())
+        val baseThumb = Bitmap.createScaledBitmap(scaledFrames[0], tw, th, true)
+        val baseThumbPx = IntArray(tw * th).also { baseThumb.getPixels(it, 0, tw, 0, 0, tw, th) }
+        baseThumb.recycle()
+
+        val shifts = ArrayList<Pair<Int, Int>>(scaledFrames.size)
+        shifts.add(0 to 0)
+        for (i in 1 until scaledFrames.size) {
+            val candThumb = Bitmap.createScaledBitmap(scaledFrames[i], tw, th, true)
+            val candPx = IntArray(tw * th).also { candThumb.getPixels(it, 0, tw, 0, 0, tw, th) }
+            candThumb.recycle()
+            val (tdx, tdy) = estimateGlobalShift(baseThumbPx, candPx, tw, th, radius = 4)
+            val fullDx = ((tdx / thumbScale).toInt()).coerceIn(-24, 24)
+            val fullDy = ((tdy / thumbScale).toInt()).coerceIn(-24, 24)
+            shifts.add(fullDx to fullDy)
+        }
+
+        val outBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val stripRows = 384
+        val candRow = IntArray(w)
+        val outStrip = IntArray(w * stripRows)
+
+        var y0 = 0
+        while (y0 < h) {
+            val rows = min(stripRows, h - y0)
+            val baseBuf = IntArray(w * rows)
+            scaledFrames[0].getPixels(baseBuf, 0, w, 0, y0, w, rows)
+
+            val accR = FloatArray(w * rows)
+            val accG = FloatArray(w * rows)
+            val accB = FloatArray(w * rows)
+            val weights = FloatArray(w * rows)
+            for (i in baseBuf.indices) {
+                val c = baseBuf[i]
+                accR[i] = ((c ushr 16) and 0xFF).toFloat()
+                accG[i] = ((c ushr 8) and 0xFF).toFloat()
+                accB[i] = (c and 0xFF).toFloat()
+                weights[i] = 1.0f
+            }
+
+            for (fIdx in 1 until scaledFrames.size) {
+                val (dx, dy) = shifts[fIdx]
+                val cand = scaledFrames[fIdx]
+                for (ry in 0 until rows) {
+                    val sy = (y0 + ry + dy).coerceIn(0, h - 1)
+                    cand.getPixels(candRow, 0, w, 0, sy, w, 1)
+                    val rowOff = ry * w
+                    for (x in 0 until w) {
+                        val sx = (x + dx).coerceIn(0, w - 1)
+                        val bc = baseBuf[rowOff + x]
+                        val sc = candRow[sx]
+                        val br = (bc ushr 16) and 0xFF
+                        val bg = (bc ushr 8) and 0xFF
+                        val bb = bc and 0xFF
+                        val sr = (sc ushr 16) and 0xFF
+                        val sg = (sc ushr 8) and 0xFF
+                        val sb = sc and 0xFF
+
+                        val diff = (abs(br - sr) + abs(bg - sg) + abs(bb - sb)) / 3f
+                        val motionWeight = when {
+                            diff < 10f -> 1.0f
+                            diff < 26f -> 1.0f - (diff - 10f) / 18f
+                            else -> 0.0f
+                        }
+                        val baseLuma = 0.2126f * br + 0.7152f * bg + 0.0722f * bb
+                        val srcLuma = 0.2126f * sr + 0.7152f * sg + 0.0722f * sb
+                        val highlightWeight = if (srcLuma > 246f && baseLuma < 238f) 0.15f else 1.0f
+                        val wPix = motionWeight * highlightWeight
+                        if (wPix > 0.01f) {
+                            accR[rowOff + x] += sr * wPix
+                            accG[rowOff + x] += sg * wPix
+                            accB[rowOff + x] += sb * wPix
+                            weights[rowOff + x] += wPix
+                        }
+                    }
+                }
+            }
+
+            for (i in 0 until w * rows) {
+                val inv = 1f / max(1f, weights[i])
+                val r = (accR[i] * inv).toInt().coerceIn(0, 255)
+                val g = (accG[i] * inv).toInt().coerceIn(0, 255)
+                val b = (accB[i] * inv).toInt().coerceIn(0, 255)
+                outStrip[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+            outBmp.setPixels(outStrip, 0, w, 0, y0, w, rows)
+            y0 += stripRows
+        }
+
+        for (i in 1 until scaledFrames.size) {
+            if (scaledFrames[i] !== bitmaps[i]) scaledFrames[i].recycle()
+        }
+        if (scaledFrames[0] !== bitmaps[0]) scaledFrames[0].recycle()
+        return outBmp
     }
 
     /**

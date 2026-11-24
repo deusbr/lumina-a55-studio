@@ -109,7 +109,10 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun processQueuedShot(job: QueuedShot) {
         val startMs = System.currentTimeMillis()
         val analysis = conceptEngine.analyze(job.raw.fullResBitmap, job.stock)
-        val denoiseLevel = if (!job.isPro) {
+        // Skip heavy single-frame spatial blur when true multi-frame burst already merged >=2 frames
+        val denoiseLevel = if (job.raw.framesDenoised >= 2) {
+            1
+        } else if (!job.isPro) {
             analysis.concept.recommendedBurstCount
         } else if (job.captureMode == CaptureMode.EDITORIAL_BURST) {
             job.manualBurstCount
@@ -117,10 +120,11 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             1
         }
 
-        val (denoisedFullRes, framesUsed) = cameraController.applyFullResDenoiseIfRequested(
+        val (denoisedFullRes, spatialFrames) = cameraController.applyFullResDenoiseIfRequested(
             job.raw.fullResBitmap,
             denoiseLevel
         )
+        val framesUsed = maxOf(job.raw.framesDenoised, spatialFrames)
         if (denoisedFullRes !== job.raw.fullResBitmap) {
             job.raw.fullResBitmap.recycle()
         }
@@ -323,8 +327,13 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             _uiState.update { it.copy(isShutterBusy = true) }
+            val burstFrames = when {
+                !isPro -> state.autoDecision.recommendedBurst.coerceIn(1, 3)
+                state.captureMode == CaptureMode.EDITORIAL_BURST -> state.burstCount.coerceIn(1, 5)
+                else -> 1
+            }
             runCatching {
-                cameraController.captureFullRes()
+                cameraController.captureBurstAndMerge(burstFrames)
             }.onSuccess { raw ->
                 val effectiveStock = if (!isPro) FilmStock.AUTO_EDITORIAL else state.selectedStock
                 _uiState.update {
@@ -438,7 +447,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         intensity: Float = _uiState.value.editIntensity,
         customProMist: Float? = null,
         customBokeh: Float? = null,
-        customGrain: Float? = null
+        customGrain: Float? = null,
+        customRelight3d: Float? = null,
+        customBackdrop: Float? = null
     ) {
         val session = _uiState.value.activeSession ?: return
         _uiState.update { it.copy(selectedStock = stock, editIntensity = intensity) }
@@ -465,7 +476,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             val tunedRecipe = baseRecipe.copy(
                 proMistStrength = customProMist ?: baseRecipe.proMistStrength,
                 backgroundBokeh = customBokeh ?: baseRecipe.backgroundBokeh,
-                grainAmount = customGrain ?: baseRecipe.grainAmount
+                grainAmount = customGrain ?: baseRecipe.grainAmount,
+                relight3dStrength = customRelight3d ?: baseRecipe.relight3dStrength,
+                studioBackdropStrength = customBackdrop ?: baseRecipe.studioBackdropStrength
             )
             val allowMask = session.hasConfidentMask || (customBokeh != null && customBokeh > 0.01f && (mask?.width ?: 0) > 16)
 

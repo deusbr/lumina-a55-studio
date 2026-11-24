@@ -91,9 +91,12 @@ object EditorialShaderEngine {
         uniform float vignetteStrength;
         uniform float monochrome;
         uniform float dehazeAmount;
+        uniform float relight3dStrength;
+        uniform float studioBackdropStrength;
+        uniform float keyDirectionSign;
 
-        float luma(half3 c) {
-            return dot(c, half3(0.2126, 0.7152, 0.0722));
+        float luma(float3 c) {
+            return dot(c, float3(0.2126, 0.7152, 0.0722));
         }
 
         float hash12(float2 p) {
@@ -104,22 +107,43 @@ object EditorialShaderEngine {
 
         float4 sampleSemantic(float2 globalCoord) {
             float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
-            return subjectMask.eval(uv * maskSize);
+            float2 px = uv * maskSize - float2(0.5);
+            float2 f = fract(px);
+            float2 p00 = clamp(floor(px) + float2(0.5), float2(0.5), max(maskSize - float2(0.5), float2(0.5)));
+            float2 p10 = clamp(p00 + float2(1.0, 0.0), float2(0.5), max(maskSize - float2(0.5), float2(0.5)));
+            float2 p01 = clamp(p00 + float2(0.0, 1.0), float2(0.5), max(maskSize - float2(0.5), float2(0.5)));
+            float2 p11 = clamp(p00 + float2(1.0, 1.0), float2(0.5), max(maskSize - float2(0.5), float2(0.5)));
+            float4 c00 = float4(subjectMask.eval(p00));
+            float4 c10 = float4(subjectMask.eval(p10));
+            float4 c01 = float4(subjectMask.eval(p01));
+            float4 c11 = float4(subjectMask.eval(p11));
+            return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
         }
 
         float sampleBokehWeight(float2 globalCoord) {
             float2 uv = clamp(globalCoord / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
-            float fg = hasSubjectMask > 0.5 ? clamp(float(subjectMask.eval(uv * maskSize).r), 0.0, 1.0) : 1.0;
-            float segBg = hasSubjectMask > 0.5 ? smoothstep(0.16, 0.84, 1.0 - fg) : 0.0;
+            float fg = hasSubjectMask > 0.5 ? clamp(sampleSemantic(globalCoord).r, 0.0, 1.0) : 1.0;
+            float segBg = hasSubjectMask > 0.5 ? clamp(1.0 - fg, 0.0, 1.0) : 0.0;
             if (hasDepthMap > 0.5) {
                 float depthCoc = clamp(float(depthMap.eval(uv * depthSize).g), 0.0, 1.0);
                 if (hasSubjectMask > 0.5) {
-                    float combinedBg = max(depthCoc, segBg * 0.94);
-                    return combinedBg * (1.0 - smoothstep(0.42, 0.88, fg));
+                    float combinedBg = max(depthCoc * 0.85, segBg);
+                    return combinedBg * clamp((1.0 - fg) * 1.18, 0.0, 1.0);
                 }
                 return depthCoc;
             }
-            return segBg;
+            return smoothstep(0.08, 0.92, segBg);
+        }
+
+        float3 applyStudioBackdrop(float3 col, float2 uv, float2 asp, float weightBg) {
+            if (studioBackdropStrength <= 0.01 || weightBg <= 0.005) return col;
+            float2 haloCenter = hasFace > 0.5 ? faceCenter : float2(0.5, 0.42);
+            float dHalo = length((uv - haloCenter) * asp);
+            float haloGrad = exp(-dHalo * dHalo * 3.0);
+            float3 studioCyclorama = mix(float3(0.068, 0.065, 0.063), float3(0.185, 0.178, 0.170), haloGrad);
+            float3 moodyBg = mix(col * 0.42, studioCyclorama, 0.48);
+            float bgAlpha = clamp(weightBg * studioBackdropStrength, 0.0, 1.0);
+            return mix(col, moodyBg, bgAlpha);
         }
 
         half4 main(float2 fragCoord) {
@@ -135,37 +159,42 @@ object EditorialShaderEngine {
             float bgWeight = sampleBokehWeight(globalCoord);
 
             half4 baseSample = inputImage.eval(fragCoord);
-            half3 rgb = baseSample.rgb;
+            float3 centerBackdropRgb = applyStudioBackdrop(float3(baseSample.rgb), uv, asp, bgWeight);
+            float3 rgb = centerBackdropRgb;
 
-            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (MiDaS Depth + Semantic Bleed Guard)
-            if (backgroundBokeh > 0.01 && bgWeight > 0.02) {
+            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (pre-toned backdrop eliminates bright-wall hair halos)
+            if (backgroundBokeh > 0.01 && bgWeight > 0.015) {
                 float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.022, 10.0, 52.0);
-                half3 acc = rgb;
+                float3 acc = centerBackdropRgb;
                 float weightSum = 1.0;
                 float goldenAngle = 2.39996323;
-                for (int i = 1; i <= 24; i++) {
-                    float fi = float(i);
+                for (int i = 0; i < 24; i++) {
+                    float fi = float(i + 1);
                     float rFrac = sqrt(fi / 24.0);
                     float ang = fi * goldenAngle;
                     float2 off = float2(cos(ang), sin(ang)) * (rFrac * radius);
-                    float sf = hasSubjectMask > 0.5 ? clamp(float(sampleSemantic(globalCoord + off).r), 0.0, 1.0) : 0.0;
-                    float w = 1.0 - smoothstep(0.36, 0.82, sf);
-                    acc += inputImage.eval(fragCoord + off).rgb * w;
+                    float2 tapGlobal = globalCoord + off;
+                    float2 tapUv = clamp(tapGlobal / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
+                    float tapBgWeight = sampleBokehWeight(tapGlobal);
+                    float3 tapCol = applyStudioBackdrop(float3(inputImage.eval(fragCoord + off).rgb), tapUv, asp, tapBgWeight);
+                    float sf = hasSubjectMask > 0.5 ? clamp(sampleSemantic(tapGlobal).r, 0.0, 1.0) : 0.0;
+                    float w = 1.0 - smoothstep(0.30, 0.85, sf);
+                    acc += tapCol * w;
                     weightSum += w;
                 }
-                rgb = mix(rgb, acc / max(weightSum, 0.001), smoothstep(0.02, 0.85, bgWeight));
+                rgb = mix(centerBackdropRgb, acc / max(weightSum, 0.001), smoothstep(0.015, 0.85, bgWeight));
             }
 
             // 2. Apply Zero-DCE Neural Gain Map ONLY when genuinely dark scene triggered it
             if (hasNeuralGain > 0.5) {
-                half3 encodedGain = neuralGainMap.eval(uv * gainSize).rgb;
-                half3 gain = clamp(encodedGain * 2.0 + half3(0.5), half3(0.85), half3(1.85));
-                rgb = clamp(rgb * gain, 0.0, 1.0);
+                float3 encodedGain = float3(neuralGainMap.eval(uv * gainSize).rgb);
+                float3 gain = clamp(encodedGain * 2.0 + float3(0.5), float3(0.85), float3(1.85));
+                rgb = clamp(rgb * gain, float3(0.0), float3(1.0));
             }
 
-            float heuristicSkin = smoothstep(0.05, 0.24, float(rgb.r - rgb.b)) *
-                                  smoothstep(0.02, 0.14, float(rgb.r - rgb.g)) *
-                                  smoothstep(0.18, 0.85, float(rgb.r));
+            float heuristicSkin = smoothstep(0.05, 0.24, rgb.r - rgb.b) *
+                                  smoothstep(0.02, 0.14, rgb.r - rgb.g) *
+                                  smoothstep(0.18, 0.85, rgb.r);
             float activeSkin = max(skinMask, heuristicSkin * 0.55);
 
             // Keep eyes & eyebrows 100% razor sharp (suppress skin smoothing around eye sockets)
@@ -183,29 +212,30 @@ object EditorialShaderEngine {
 
             // 3. Frequency-Separated Studio Skin Polish + Crisp Hair/Eyes/Glasses/Fabric Acutance
             float blurFine = clamp(minDim * 0.0018, 1.4, 4.0);
-            half3 localFine = (
-                inputImage.eval(fragCoord + float2(blurFine, 0.0)).rgb +
-                inputImage.eval(fragCoord - float2(blurFine, 0.0)).rgb +
-                inputImage.eval(fragCoord + float2(0.0, blurFine)).rgb +
-                inputImage.eval(fragCoord - float2(0.0, blurFine)).rgb
+            float3 localFine = (
+                float3(inputImage.eval(fragCoord + float2(blurFine, 0.0)).rgb) +
+                float3(inputImage.eval(fragCoord - float2(blurFine, 0.0)).rgb) +
+                float3(inputImage.eval(fragCoord + float2(0.0, blurFine)).rgb) +
+                float3(inputImage.eval(fragCoord - float2(0.0, blurFine)).rgb)
             ) * 0.25;
 
             if (activeSkin > 0.12 && eyeKeepSharp < 0.75) {
                 float blurWide = blurFine * 2.5;
-                half3 localWide = (
-                    inputImage.eval(fragCoord + float2(blurWide, 0.0)).rgb +
-                    inputImage.eval(fragCoord - float2(blurWide, 0.0)).rgb +
-                    inputImage.eval(fragCoord + float2(0.0, blurWide)).rgb +
-                    inputImage.eval(fragCoord - float2(0.0, blurWide)).rgb
+                float3 localWide = (
+                    float3(inputImage.eval(fragCoord + float2(blurWide, 0.0)).rgb) +
+                    float3(inputImage.eval(fragCoord - float2(blurWide, 0.0)).rgb) +
+                    float3(inputImage.eval(fragCoord + float2(0.0, blurWide)).rgb) +
+                    float3(inputImage.eval(fragCoord - float2(0.0, blurWide)).rgb)
                 ) * 0.25;
-                half3 smoothedSkin = clamp(localWide + (rgb - localFine) * 0.92, 0.0, 1.0);
+                float3 smoothedSkin = clamp(localWide + (rgb - localFine) * 0.92, float3(0.0), float3(1.0));
                 rgb = mix(rgb, smoothedSkin, activeSkin * 0.22 * (1.0 - eyeKeepSharp));
             }
 
-            // Sharp crisp acutance on eyes, hair, beard, glasses, clothes (never over-sharpening skin pores)
+            // Sharp crisp acutance on eyes, hair, beard, glasses, clothes (never sharpen mask boundary seams or skin pores)
             float skinDamp = activeSkin * 0.80 * (1.0 - eyeKeepSharp);
-            float acutance = (clarity + 0.08 + detailMask * 0.16 + eyeKeepSharp * 0.14) * (1.0 - skinDamp) * (1.0 - bgWeight * 0.88);
-            rgb = clamp(rgb + (rgb - localFine) * acutance, 0.0, 1.0);
+            float interiorGuard = smoothstep(0.40, 0.90, fgMask) * (1.0 - bgWeight);
+            float acutance = (clarity + 0.08 + detailMask * 0.16 + eyeKeepSharp * 0.14) * (1.0 - skinDamp) * interiorGuard;
+            rgb = clamp(rgb + (rgb - localFine) * acutance, float3(0.0), float3(1.0));
 
             // Optional Pro-Mist & Halation (zero by default in Studio/Normal mode; active only when requested)
             if (proMistStrength > 0.01) {
@@ -215,41 +245,66 @@ object EditorialShaderEngine {
 
             if (halationStrength > 0.01) {
                 float haloSpread = clamp(minDim * 0.005, 4.0, 14.0);
-                half3 haloAvg = (
-                    inputImage.eval(fragCoord + float2(haloSpread, haloSpread)).rgb +
-                    inputImage.eval(fragCoord + float2(-haloSpread, haloSpread)).rgb +
-                    inputImage.eval(fragCoord + float2(haloSpread, -haloSpread)).rgb +
-                    inputImage.eval(fragCoord + float2(-haloSpread, -haloSpread)).rgb
+                float3 haloAvg = (
+                    float3(inputImage.eval(fragCoord + float2(haloSpread, haloSpread)).rgb) +
+                    float3(inputImage.eval(fragCoord + float2(-haloSpread, haloSpread)).rgb) +
+                    float3(inputImage.eval(fragCoord + float2(haloSpread, -haloSpread)).rgb) +
+                    float3(inputImage.eval(fragCoord + float2(-haloSpread, -haloSpread)).rgb)
                 ) * 0.25;
                 float haloEnergy = smoothstep(0.88, 1.0, luma(haloAvg));
-                rgb += half3(1.0, 0.34, 0.14) * haloEnergy * halationStrength * 0.22 * (1.0 - activeSkin * 0.90);
+                rgb += float3(1.0, 0.34, 0.14) * haloEnergy * halationStrength * 0.22 * (1.0 - activeSkin * 0.90);
             }
 
-            // 4. Linearize + Sculpted 3D Studio Softbox Key Light & Crisp Eye Catchlights
-            half3 lin = pow(clamp(rgb, 0.0, 1.0), half3(2.2));
+            // 4. Linearize + 3D Normal-Map Studio Relighting (45° Softbox + Negative Fill + Rim + Dodge & Burn)
+            float3 lin = pow(max(clamp(rgb, float3(0.0), float3(1.0)), float3(0.0001)), float3(2.2));
 
-            float faceFocus = fgMask;
+            float faceFocus = fgMask * (0.20 + 0.80 * activeSkin);
             float keyBoost = 0.0;
             float eyeSparkle = 0.0;
+            float underEyeFill = 0.0;
             if (hasFace > 0.5) {
                 float dFace = length((uv - faceCenter) * asp) / max(faceRadius, 0.08);
                 float faceSpot = exp(-dFace * dFace * 1.10);
-                keyBoost = faceSpot * 0.15;
-                faceFocus = mix(0.25, 1.0, faceSpot) * fgMask;
+                keyBoost = faceSpot * 0.15 * (0.25 + 0.75 * activeSkin);
+                faceFocus = mix(0.12, 1.0, faceSpot) * fgMask * (0.30 + 0.70 * activeSkin);
                 if (leftEye.x > 0.0) {
                     float dL = length((uv - leftEye) * asp) / max(faceRadius * 0.10, 0.005);
-                    eyeSparkle += exp(-dL * dL * 2.4) * 0.22;
+                    eyeSparkle += exp(-dL * dL * 2.4) * 0.24;
+                    float2 underL = (uv - float2(leftEye.x, leftEye.y + faceRadius * 0.09)) * asp;
+                    float duL = length(underL) / max(faceRadius * 0.14, 0.01);
+                    underEyeFill = max(underEyeFill, exp(-duL * duL * 2.2) * 0.14);
                 }
                 if (rightEye.x > 0.0) {
                     float dR = length((uv - rightEye) * asp) / max(faceRadius * 0.10, 0.005);
-                    eyeSparkle += exp(-dR * dR * 2.4) * 0.22;
+                    eyeSparkle += exp(-dR * dR * 2.4) * 0.24;
+                    float2 underR = (uv - float2(rightEye.x, rightEye.y + faceRadius * 0.09)) * asp;
+                    float duR = length(underR) / max(faceRadius * 0.14, 0.01);
+                    underEyeFill = max(underEyeFill, exp(-duR * duR * 2.2) * 0.14);
                 }
+            }
+
+            float normalRelight3d = 1.0;
+            if (relight3dStrength > 0.01 && hasDepthMap > 0.5) {
+                float2 dUV = clamp(uv, float2(0.01), float2(0.99)) * depthSize;
+                float dStep = 2.0;
+                float dL = float(depthMap.eval(dUV - float2(dStep, 0.0)).r);
+                float dR = float(depthMap.eval(dUV + float2(dStep, 0.0)).r);
+                float dU = float(depthMap.eval(dUV - float2(0.0, dStep)).r);
+                float dD = float(depthMap.eval(dUV + float2(0.0, dStep)).r);
+                float3 surfN = normalize(float3((dL - dR) * 4.2, (dU - dD) * 4.2, 0.34));
+                float3 keyDir = normalize(float3(keyDirectionSign * 0.58, -0.42, 0.68));
+                float ndotl = clamp(dot(surfN, keyDir), 0.0, 1.0);
+                float negFill = clamp(-dot(surfN, keyDir), 0.0, 1.0);
+                float kickerSide = clamp(surfN.x * (-keyDirectionSign) * 0.8 + 0.25, 0.0, 1.0);
+                float fresnelRim = pow(max(0.001, 1.0 - abs(surfN.z)), 4.0) * kickerSide * fgMask * (1.0 - smoothstep(0.18, 0.42, luma(rgb)));
+                float sculpt = (ndotl * 0.28 - negFill * 0.20 + fresnelRim * 0.09) * fgMask * relight3dStrength;
+                normalRelight3d = clamp(1.0 + sculpt + underEyeFill * relight3dStrength, 0.74, 1.42);
             }
 
             float relight = 1.0 + (faceRelightGain * faceFocus + keyBoost) - backgroundDimming * bgWeight;
             float skyFactor = smoothstep(0.55, 0.0, uv.y) * (1.0 - fgMask * hasSubjectMask) * smoothstep(0.45, 0.92, luma(rgb));
             float skyGain = 1.0 - skyRecovery * skyFactor * 0.36;
-            lin *= exp2(exposureOffset) * clamp(relight, 0.68, 1.42) * skyGain * (1.0 + eyeSparkle);
+            lin *= exp2(exposureOffset) * clamp(relight, 0.52, 1.45) * normalRelight3d * skyGain * (1.0 + eyeSparkle);
 
             float wbDamp = mix(1.0, 1.0 - skinProtection * 0.55, activeSkin);
             lin.r *= 1.0 + warmth * 0.30 * wbDamp;
@@ -265,25 +320,33 @@ object EditorialShaderEngine {
             float shoulder = 1.0 / (1.0 + over * highlightRollOff * 0.95);
             lin *= mix(1.0, shoulder, smoothstep(0.50, 1.15, lumLin));
 
-            // 5. Studio Print Grading in sRGB Space + Adaptive Veiling-Glare Dehaze
-            half3 srgb = pow(clamp(lin, 0.0, 1.0), half3(1.0 / 2.2));
+            // 5. Studio Print Grading in sRGB Space + Adaptive Veiling-Glare & Overhead Hair Haze Cut
+            float3 srgb = pow(max(clamp(lin, float3(0.0), float3(1.0)), float3(0.0001)), float3(1.0 / 2.2));
             if (dehazeAmount > 0.002) {
                 float dh = clamp(dehazeAmount, 0.0, 0.12);
-                srgb = clamp((srgb - half3(dh)) / max(0.85, 1.0 - dh), 0.0, 1.0);
+                srgb = clamp((srgb - float3(dh)) / max(0.85, 1.0 - dh), float3(0.0), float3(1.0));
             }
-            srgb = clamp((srgb - 0.50) * contrast + 0.50, 0.0, 1.0);
+            float darkDetail = clamp(detailMask * (1.0 - activeSkin) * fgMask, 0.0, 1.0);
+            if (darkDetail > 0.05) {
+                float lDet = luma(srgb);
+                float hazeZone = smoothstep(0.08, 0.36, lDet) * (1.0 - smoothstep(0.44, 0.70, lDet));
+                srgb *= mix(1.0, 0.70, hazeZone * darkDetail);
+                float coolExcess = smoothstep(0.0, 0.05, srgb.b - srgb.r);
+                srgb.b = mix(srgb.b, (srgb.r + srgb.g) * 0.49, 0.45 * darkDetail * coolExcess);
+            }
+            srgb = clamp((srgb - 0.50) * contrast + 0.50, float3(0.0), float3(1.0));
 
             // Subtle Split-Tone (clean neutral highlights + crisp studio shadows)
             float lumOut = luma(srgb);
             if (monochrome > 0.5) {
-                float bw = clamp(dot(srgb, half3(0.30, 0.56, 0.14)), 0.0, 1.0);
-                srgb = half3(bw, bw * 0.995, bw * 0.985);
+                float bw = clamp(dot(srgb, float3(0.30, 0.56, 0.14)), 0.0, 1.0);
+                srgb = float3(bw, bw * 0.995, bw * 0.985);
             } else {
-                half3 coolShadow = half3(-0.008, 0.0, 0.012) * (1.0 - smoothstep(0.0, 0.30, lumOut)) * (1.0 - activeSkin);
-                half3 warmHigh = half3(0.006, 0.002, -0.004) * smoothstep(0.58, 0.95, lumOut);
-                srgb = clamp(srgb + coolShadow + warmHigh, 0.0, 1.0);
+                float3 coolShadow = float3(-0.008, 0.0, 0.012) * (1.0 - smoothstep(0.0, 0.30, lumOut)) * (1.0 - activeSkin);
+                float3 warmHigh = float3(0.006, 0.002, -0.004) * smoothstep(0.58, 0.95, lumOut);
+                srgb = clamp(srgb + coolShadow + warmHigh, float3(0.0), float3(1.0));
                 float satEffective = mix(saturation, mix(1.0, saturation, 0.45), activeSkin * skinProtection);
-                srgb = clamp(mix(half3(lumOut), srgb, satEffective), 0.0, 1.0);
+                srgb = clamp(mix(float3(lumOut), srgb, satEffective), float3(0.0), float3(1.0));
             }
 
             float2 centered = (uv - 0.5) * float2(1.0, fullImageSize.y / max(fullImageSize.x, 1.0));
@@ -291,9 +354,9 @@ object EditorialShaderEngine {
             srgb *= clamp(1.0 - distSq * vignetteStrength * 0.95, 0.55, 1.0);
 
             float grain = (hash12(globalCoord) - 0.5) * grainAmount * 0.075 * (1.0 - abs(lumOut - 0.5));
-            srgb = clamp(srgb + half3(grain), 0.0, 1.0);
+            srgb = clamp(srgb + float3(grain), float3(0.0), float3(1.0));
 
-            return half4(srgb, baseSample.a);
+            return half4(half3(srgb), baseSample.a);
         }
     """
 
@@ -342,6 +405,8 @@ object EditorialShaderEngine {
                     hasConfidentMask = hasConfidentMask && subjectMask != null
                 )
             }
+        }.onFailure { err ->
+            android.util.Log.e("EditorialShaderEngine", "GPU RuntimeShader failed, falling back to CPU", err)
         }.getOrNull()
 
         if (gpuBitmap != null) {
@@ -373,7 +438,9 @@ object EditorialShaderEngine {
             proMistStrength = r.proMistStrength * t,
             grainAmount = r.grainAmount * t,
             vignetteStrength = r.vignetteStrength * t,
-            dehazeAmount = r.dehazeAmount * t
+            dehazeAmount = r.dehazeAmount * t,
+            relight3dStrength = r.relight3dStrength * t,
+            studioBackdropStrength = r.studioBackdropStrength * t
         )
     }
 
@@ -497,10 +564,15 @@ object EditorialShaderEngine {
         shader.setFloatUniform("vignetteStrength", recipe.vignetteStrength)
         shader.setFloatUniform("monochrome", if (recipe.monochrome) 1.0f else 0.0f)
         shader.setFloatUniform("dehazeAmount", recipe.dehazeAmount)
+        shader.setFloatUniform("relight3dStrength", recipe.relight3dStrength)
+        shader.setFloatUniform("studioBackdropStrength", recipe.studioBackdropStrength)
+        shader.setFloatUniform("keyDirectionSign", recipe.keyDirectionSign)
 
         val reader = ImageReader.newInstance(
             w, h, PixelFormat.RGBA_8888, 1,
-            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_GPU_COLOR_OUTPUT
+            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or
+                HardwareBuffer.USAGE_GPU_COLOR_OUTPUT or
+                HardwareBuffer.USAGE_CPU_READ_OFTEN
         )
         val renderer = HardwareRenderer()
         val node = RenderNode("LuminaEditorialPass").apply {
@@ -516,17 +588,31 @@ object EditorialShaderEngine {
             renderer.createRenderRequest().setWaitForPresent(true).syncAndDraw()
             val img = reader.acquireLatestImage() ?: error("ImageReader returned null GPU frame.")
             img.use { image ->
-                val plane = image.planes[0]
-                val rowStride = plane.rowStride
-                val pixelStride = plane.pixelStride
-                val rowPadding = rowStride - pixelStride * w
-                val outBmp = Bitmap.createBitmap(w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
-                outBmp.copyPixelsFromBuffer(plane.buffer)
-                return if (outBmp.width != w) {
-                    Bitmap.createBitmap(outBmp, 0, 0, w, h).also { outBmp.recycle() }
-                } else {
-                    outBmp
+                val planeBmp = runCatching {
+                    val plane = image.planes[0]
+                    val rowStride = plane.rowStride
+                    val pixelStride = plane.pixelStride
+                    val rowPadding = rowStride - pixelStride * w
+                    val outBmp = Bitmap.createBitmap(w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
+                    outBmp.copyPixelsFromBuffer(plane.buffer)
+                    if (outBmp.width != w) {
+                        Bitmap.createBitmap(outBmp, 0, 0, w, h).also { outBmp.recycle() }
+                    } else {
+                        outBmp
+                    }
+                }.getOrNull()
+                if (planeBmp != null) return planeBmp
+
+                val hwBmp = image.hardwareBuffer?.let { hb ->
+                    try {
+                        Bitmap.wrapHardwareBuffer(hb, null)?.let { wrapped ->
+                            wrapped.copy(Bitmap.Config.ARGB_8888, false).also { wrapped.recycle() }
+                        }
+                    } finally {
+                        hb.close()
+                    }
                 }
+                return hwBmp ?: error("Failed to read RGBA_8888 GPU frame from ImageReader.")
             }
         } finally {
             node.discardDisplayList()

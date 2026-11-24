@@ -124,7 +124,10 @@ data class EditRecipe(
     val grainAmount: Float,
     val vignetteStrength: Float,
     val monochrome: Boolean,
-    val dehazeAmount: Float = 0.02f
+    val dehazeAmount: Float = 0.02f,
+    val relight3dStrength: Float = 0.0f,
+    val studioBackdropStrength: Float = 0.0f,
+    val keyDirectionSign: Float = -1.0f
 )
 
 data class SceneConcept(

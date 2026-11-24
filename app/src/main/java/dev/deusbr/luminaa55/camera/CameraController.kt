@@ -295,6 +295,35 @@ class CameraController(private val context: Context) {
         }
     }
 
+    /**
+     * Captures a rapid multi-frame burst and merges aligned frames in memory-safe strips,
+     * preserving sensor detail while suppressing shadow noise and highlights.
+     */
+    suspend fun captureBurstAndMerge(targetFrames: Int): RawCaptureOutput {
+        val count = targetFrames.coerceIn(1, 5)
+        if (count <= 1) return captureFullRes()
+
+        val first = captureFullRes()
+        val frames = mutableListOf(first.fullResBitmap)
+        for (i in 1 until count) {
+            val extra = runCatching { captureFullRes() }.getOrNull() ?: break
+            frames.add(extra.fullResBitmap)
+        }
+        if (frames.size == 1) return first
+
+        val merged = withContext(Dispatchers.Default) {
+            MultiFrameBurstProcessor.mergeBitmaps(frames)
+        }
+        for (bmp in frames) {
+            if (bmp !== merged) bmp.recycle()
+        }
+        return RawCaptureOutput(
+            fullResBitmap = merged,
+            exifBytes = first.exifBytes,
+            framesDenoised = frames.size
+        )
+    }
+
     suspend fun applyFullResDenoiseIfRequested(raw: Bitmap, burstStrength: Int): Pair<Bitmap, Int> {
         if (burstStrength <= 1) return raw to 1
         return withContext(Dispatchers.Default) {
@@ -448,7 +477,7 @@ class CameraController(private val context: Context) {
                         srcExif.getAttribute(t)?.let { dstExif.setAttribute(t, it) }
                     }
                     dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v2.3 ($conceptTag)")
+                    dstExif.setAttribute(ExifInterface.TAG_SOFTWARE, "Lumina A55 Studio v3.0 ($conceptTag)")
                     dstExif.saveAttributes()
                 }
             }

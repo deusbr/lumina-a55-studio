@@ -210,4 +210,33 @@ class PhotometricAndBurstTest {
         val blackR = (blackPixel ushr 16) and 0xFF
         assertTrue("Pure black must stay deep black (<= 2), got $blackR", blackR <= 2)
     }
+
+    @Test
+    fun contextEngineDifferentiatesIndoorStudioPortraitFromOutdoorLandscape() {
+        val px = solidFrame(32, 32, 122, 118, 110)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
+
+        val indoorPortrait = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person", "Portrait"),
+            faceCount = 1,
+            subjectRatio = 0.65f,
+            userSelectedStock = FilmStock.AUTO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        assertTrue("Indoor portrait must enable 3D normal relight", indoorPortrait.recipe.relight3dStrength >= 0.60f)
+        assertTrue("Indoor portrait must activate studio backdrop cyclorama", indoorPortrait.recipe.studioBackdropStrength >= 0.35f)
+
+        val skyLandscape = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Sky", "Mountain"),
+            faceCount = 0,
+            subjectRatio = 0.25f,
+            userSelectedStock = FilmStock.AUTO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        assertEquals("Landscape sky must keep backdrop cyclorama disabled", 0f, skyLandscape.recipe.studioBackdropStrength, 0.001f)
+        assertEquals("Landscape sky must keep background sharp (no portrait bokeh)", 0f, skyLandscape.recipe.backgroundBokeh, 0.001f)
+        assertTrue("Landscape sky must recover highlights", skyLandscape.recipe.skyRecovery >= 0.50f)
+    }
 }
