@@ -29,7 +29,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Info
@@ -56,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -105,7 +105,7 @@ fun CameraScreen(
             .fillMaxSize()
             .background(LuminaColors.VoidBg)
     ) {
-        // Full-bleed Live Viewfinder
+        // Unobstructed Full-Bleed Viewfinder
         AndroidView(
             factory = {
                 previewView.setOnTouchListener { _, event ->
@@ -120,379 +120,287 @@ fun CameraScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Precision Rule-of-Thirds & Optical Corner Bracket Reticle
+        // Subtle Rule-of-Thirds & Precision Optical Corner Reticle
         Canvas(modifier = Modifier.fillMaxSize()) {
-            if (state.showGrid) {
-                val lineColor = LuminaColors.InkPrimary.copy(alpha = 0.13f)
-                drawLine(lineColor, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), 1.5f)
-                drawLine(lineColor, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), 1.5f)
-                drawLine(lineColor, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1.5f)
-                drawLine(lineColor, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1.5f)
+            if (state.showGrid && isPro) {
+                val lineColor = LuminaColors.InkPrimary.copy(alpha = 0.11f)
+                drawLine(lineColor, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), 1f)
+                drawLine(lineColor, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), 1f)
+                drawLine(lineColor, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1f)
+                drawLine(lineColor, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1f)
             }
             focusPoint?.let { pt ->
-                val half = 36f
-                val arm = 14f
+                val half = 34f
+                val arm = 12f
                 val col = LuminaColors.OpticalAmber
-                val sw = 3f
-                // Top-left bracket
+                val sw = 2.5f
                 drawLine(col, Offset(pt.x - half, pt.y - half), Offset(pt.x - half + arm, pt.y - half), sw)
                 drawLine(col, Offset(pt.x - half, pt.y - half), Offset(pt.x - half, pt.y - half + arm), sw)
-                // Top-right bracket
                 drawLine(col, Offset(pt.x + half, pt.y - half), Offset(pt.x + half - arm, pt.y - half), sw)
                 drawLine(col, Offset(pt.x + half, pt.y - half), Offset(pt.x + half, pt.y - half + arm), sw)
-                // Bottom-left bracket
                 drawLine(col, Offset(pt.x - half, pt.y + half), Offset(pt.x - half + arm, pt.y + half), sw)
                 drawLine(col, Offset(pt.x - half, pt.y + half), Offset(pt.x - half, pt.y + half - arm), sw)
-                // Bottom-right bracket
                 drawLine(col, Offset(pt.x + half, pt.y + half), Offset(pt.x + half - arm, pt.y + half), sw)
                 drawLine(col, Offset(pt.x + half, pt.y + half), Offset(pt.x + half, pt.y + half - arm), sw)
             }
         }
 
-        // Top Minimal Darkroom Telemetry HUD
-        Column(
+        // Whisper-Clean Top Gradient Scrim + Single Quiet Status Line (Zero boxy cards!)
+        Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.52f), Color.Transparent)
+                    )
+                )
                 .statusBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .padding(end = 8.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(LuminaColors.PanelTranslucent)
-                        .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(if (isPro) LuminaColors.OpticalAmber else LuminaColors.StudioEmerald)
-                    )
-                    Column {
-                        Text(
-                            text = "LUMINA A55",
-                            color = LuminaColors.InkPrimary,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "${state.activeLens.sensorSpec} · FULL-RES",
-                            color = LuminaColors.InkSecondary,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                // Right quick indicator / Pro tools only when in Pro
-                if (isPro) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        IconButton(
-                            onClick = { viewModel.toggleSessionLock() },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(LuminaColors.PanelTranslucent)
-                                .border(
-                                    1.dp,
-                                    if (state.sessionLookLocked) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
-                                    CircleShape
-                                )
-                        ) {
-                            Icon(
-                                if (state.sessionLookLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                                contentDescription = "Travar Look da Sessão",
-                                tint = if (state.sessionLookLocked) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = { viewModel.toggleGrid() },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(LuminaColors.PanelTranslucent)
-                                .border(1.dp, LuminaColors.HairlineBorder, CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Default.GridOn,
-                                contentDescription = "Grade 3x3",
-                                tint = if (state.showGrid) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = { viewModel.toggleDiagnostics(true) },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(LuminaColors.PanelTranslucent)
-                                .border(1.dp, LuminaColors.HairlineBorder, CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Default.Info,
-                                contentDescription = "Diagnóstico Camera2",
-                                tint = LuminaColors.InkPrimary,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        }
-                    }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(LuminaColors.PanelTranslucent)
-                            .border(1.dp, LuminaColors.StudioEmerald.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
-                            .padding(horizontal = 12.dp, vertical = 7.dp)
-                    ) {
-                        Text(
-                            text = "AUTO IA",
-                            color = LuminaColors.StudioEmerald,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
-
-            // Live Contextual Intelligence Pill (informative in Normal, reference in Pro)
-            Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(LuminaColors.PanelTranslucent)
-                    .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                    .weight(1f, fill = false)
+                    .padding(end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    Icons.Default.AutoAwesome,
-                    contentDescription = null,
-                    tint = if (isPro) LuminaColors.OpticalAmber else LuminaColors.StudioEmerald,
-                    modifier = Modifier.size(15.dp)
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(if (isPro) LuminaColors.OpticalAmber else LuminaColors.StudioEmerald)
                 )
-                Column(modifier = Modifier.weight(1f, fill = false)) {
-                    Text(
-                        text = state.autoDecision.headline,
-                        color = LuminaColors.InkPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (isPro) {
-                            "Pro: ${state.selectedStock.displayName} · ${state.captureMode.label}"
-                        } else {
-                            "Auto: ${state.autoDecision.subtitle}"
-                        },
-                        color = LuminaColors.InkSecondary,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 9.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Text(
+                    text = if (isPro) {
+                        state.selectedStock.displayName
+                    } else {
+                        "${state.autoDecision.headline} · ${state.autoDecision.recommendedStock.displayName}"
+                    },
+                    color = LuminaColors.InkPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (isPro) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { viewModel.toggleSessionLock() }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            if (state.sessionLookLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = "Travar look",
+                            tint = if (state.sessionLookLocked) LuminaColors.OpticalAmber else LuminaColors.InkPrimary.copy(alpha = 0.8f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    IconButton(onClick = { viewModel.toggleGrid() }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.GridOn,
+                            contentDescription = "Grade",
+                            tint = if (state.showGrid) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    IconButton(onClick = { viewModel.toggleDiagnostics(true) }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = "Sensores",
+                            tint = LuminaColors.InkPrimary.copy(alpha = 0.8f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
+            } else {
+                Text(
+                    text = "AUTO",
+                    color = LuminaColors.InkPrimary.copy(alpha = 0.72f),
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.4.sp
+                )
             }
         }
 
-        // Bottom Ergonomic Thumb-Zone Deck
+        // Clean Darkroom Bottom Zone (Zero bulky multi-layer capsules!)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(LuminaColors.PanelSurface.copy(alpha = 0.94f))
-                .border(1.dp, LuminaColors.HairlineBorder)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f), Color.Black.copy(alpha = 0.96f))
+                    )
+                )
                 .navigationBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Dedicated PRO Controls Drawer (hidden completely in NORMAL mode)
             if (isPro) {
-                ProStudioDeck(state = state, viewModel = viewModel, lifecycleOwner = lifecycleOwner, previewView = previewView)
+                ProMinimalDeck(
+                    state = state,
+                    viewModel = viewModel,
+                    lifecycleOwner = lifecycleOwner,
+                    previewView = previewView
+                )
             }
 
-            // Optical Focal Length Ruler (Clean in both Normal & Pro)
+            // Floating Minimal Focal Length Selector (typographic circles)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val backLenses = remember {
                     listOf(LensOption.ULTRA_WIDE, LensOption.MAIN_IMX906, LensOption.TELE_2X, LensOption.MACRO)
                 }
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(LuminaColors.ElevatedSurface)
-                        .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(999.dp))
-                        .padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    backLenses.forEach { lens ->
-                        val selected = state.activeLens == lens
-                        Box(
-                            modifier = Modifier
-                                .defaultMinSize(minWidth = 44.dp, minHeight = 36.dp)
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(if (selected) LuminaColors.OpticalAmber else Color.Transparent)
-                                .clickable { viewModel.selectLens(lens, lifecycleOwner, previewView) }
-                                .padding(horizontal = 12.dp, vertical = 7.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = lens.shortZoom,
-                                color = if (selected) LuminaColors.VoidBg else LuminaColors.InkPrimary,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp
+                backLenses.forEach { lens ->
+                    val selected = state.activeLens == lens
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(if (selected) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.35f))
+                            .border(
+                                1.dp,
+                                if (selected) LuminaColors.OpticalAmber else Color.White.copy(alpha = 0.12f),
+                                CircleShape
                             )
-                        }
+                            .clickable { viewModel.selectLens(lens, lifecycleOwner, previewView) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = lens.shortZoom,
+                            color = if (selected) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }
 
-            // NORMAL vs PRO Segmented Experience Switcher
+            // Quiet Editorial Mode Switcher: Normal | Pro
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(LuminaColors.VoidBg)
-                        .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(999.dp))
-                        .padding(3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    CameraExperienceMode.entries.forEach { expMode ->
-                        val active = state.experienceMode == expMode
-                        val labelText = if (expMode == CameraExperienceMode.NORMAL) "NORMAL · AUTO" else "PRO · MANUAL"
+                CameraExperienceMode.entries.forEach { expMode ->
+                    val active = state.experienceMode == expMode
+                    val labelText = if (expMode == CameraExperienceMode.NORMAL) "NORMAL" else "PRO"
+                    Column(
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 32.dp)
+                            .clickable { viewModel.selectExperienceMode(expMode, lifecycleOwner, previewView) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = labelText,
+                            color = when {
+                                active && expMode == CameraExperienceMode.PRO -> LuminaColors.OpticalAmber
+                                active -> LuminaColors.InkPrimary
+                                else -> LuminaColors.InkSecondary
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 11.sp,
+                            letterSpacing = 1.6.sp
+                        )
                         Box(
                             modifier = Modifier
-                                .defaultMinSize(minHeight = 36.dp)
-                                .clip(RoundedCornerShape(999.dp))
+                                .size(width = if (active) 16.dp else 0.dp, height = 2.dp)
+                                .clip(CircleShape)
                                 .background(
-                                    when {
-                                        active && expMode == CameraExperienceMode.PRO -> LuminaColors.OpticalAmber
-                                        active -> LuminaColors.InkPrimary
-                                        else -> Color.Transparent
-                                    }
+                                    if (expMode == CameraExperienceMode.PRO) LuminaColors.OpticalAmber else LuminaColors.InkPrimary
                                 )
-                                .clickable { viewModel.selectExperienceMode(expMode, lifecycleOwner, previewView) }
-                                .padding(horizontal = 16.dp, vertical = 7.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = labelText,
-                                color = if (active) LuminaColors.VoidBg else LuminaColors.InkSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp
-                            )
-                        }
+                        )
                     }
                 }
             }
 
-            // Primary Shutter Row (Live Studio Thumbnail + Non-Blocking Shutter + Front Switch)
+            // Balanced 3-Control Shutter Bar (Thumbnail · Leica Shutter · Flip)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 2.dp),
+                    .padding(top = 2.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val latestSession = state.studioSessions.firstOrNull()
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(LuminaColors.ElevatedSurface)
-                            .border(
-                                1.5.dp,
-                                if (state.pendingQueueCount > 0) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
-                                RoundedCornerShape(14.dp)
-                            )
-                            .clickable {
-                                if (latestSession != null) viewModel.openStudioReview(latestSession)
-                                else galleryLauncher.launch("image/*")
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (latestSession != null) {
-                            Image(
-                                bitmap = remember(latestSession.previewProcessedBitmap) {
-                                    latestSession.previewProcessedBitmap.asImageBitmap()
-                                },
-                                contentDescription = "Abrir ensaio recente",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            val badgeText = if (state.pendingQueueCount > 0) "⏳${state.pendingQueueCount}" else "${state.studioSessions.size}"
-                            Text(
-                                text = badgeText,
-                                color = LuminaColors.VoidBg,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 9.sp,
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .padding(3.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (state.pendingQueueCount > 0) LuminaColors.OpticalAmber else LuminaColors.StudioEmerald)
-                                    .padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        } else if (state.pendingQueueCount > 0) {
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp), color = LuminaColors.OpticalAmber, strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = "Abrir da galeria", tint = LuminaColors.InkPrimary)
-                        }
-                    }
-
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(LuminaColors.ElevatedSurface)
+                        .border(
+                            1.5.dp,
+                            if (state.pendingQueueCount > 0) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                            CircleShape
+                        )
+                        .clickable {
+                            if (latestSession != null) viewModel.openStudioReview(latestSession)
+                            else galleryLauncher.launch("image/*")
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
                     if (latestSession != null) {
-                        IconButton(
-                            onClick = { galleryLauncher.launch("image/*") },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(LuminaColors.ElevatedSurface)
-                                .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
-                        ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = "Importar foto", tint = LuminaColors.InkSecondary, modifier = Modifier.size(18.dp))
+                        Image(
+                            bitmap = remember(latestSession.previewProcessedBitmap) {
+                                latestSession.previewProcessedBitmap.asImageBitmap()
+                            },
+                            contentDescription = "Abrir ensaio",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (state.pendingQueueCount > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${state.pendingQueueCount}",
+                                    color = LuminaColors.OpticalAmber,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
+                    } else if (state.pendingQueueCount > 0) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = LuminaColors.OpticalAmber,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.PhotoLibrary,
+                            contentDescription = "Galeria",
+                            tint = LuminaColors.InkPrimary.copy(alpha = 0.85f),
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
 
-                // Dual-Ring Non-Blocking Tactile Precision Shutter
+                // Refined Dual-Ring Tactile Shutter
                 Box(
                     modifier = Modifier
-                        .size(78.dp)
+                        .size(72.dp)
                         .clip(CircleShape)
                         .border(
-                            3.dp,
+                            2.dp,
                             if (isPro) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
                             CircleShape
                         )
-                        .padding(6.dp)
+                        .padding(5.dp)
                         .clip(CircleShape)
                         .background(if (state.isShutterBusy) LuminaColors.ShutterCrimson else LuminaColors.InkPrimary)
                         .clickable(enabled = !state.isShutterBusy) { viewModel.captureEditorialPhoto() },
@@ -500,14 +408,14 @@ fun CameraScreen(
                 ) {
                     if (state.isShutterBusy) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(28.dp),
+                            modifier = Modifier.size(24.dp),
                             color = LuminaColors.InkPrimary,
-                            strokeWidth = 3.dp
+                            strokeWidth = 2.5.dp
                         )
                     } else if (isPro) {
                         Box(
                             modifier = Modifier
-                                .size(10.dp)
+                                .size(8.dp)
                                 .clip(CircleShape)
                                 .background(LuminaColors.ShutterCrimson)
                         )
@@ -520,28 +428,26 @@ fun CameraScreen(
                         viewModel.selectLens(next, lifecycleOwner, previewView)
                     },
                     modifier = Modifier
-                        .size(50.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
                         .background(
                             if (state.activeLens == LensOption.FRONT_32MP) LuminaColors.OpticalAmber else LuminaColors.ElevatedSurface
                         )
-                        .border(1.dp, LuminaColors.HairlineBorder, CircleShape)
                 ) {
                     Icon(
                         Icons.Default.Cameraswitch,
-                        contentDescription = "Alternar frontal 32MP",
-                        tint = if (state.activeLens == LensOption.FRONT_32MP) LuminaColors.VoidBg else LuminaColors.InkPrimary
+                        contentDescription = "Alternar frontal",
+                        tint = if (state.activeLens == LensOption.FRONT_32MP) LuminaColors.VoidBg else LuminaColors.InkPrimary,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
 
-            state.statusMessage?.let { msg ->
+            if (state.pendingQueueCount > 0) {
                 Text(
-                    text = msg,
-                    color = LuminaColors.OpticalAmber,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                    text = "Revelando ${state.pendingQueueCount} ${if (state.pendingQueueCount == 1) "foto" else "fotos"} em segundo plano",
+                    color = LuminaColors.InkSecondary,
+                    fontSize = 10.sp
                 )
             }
         }
@@ -556,7 +462,7 @@ fun CameraScreen(
 }
 
 @Composable
-private fun ProStudioDeck(
+private fun ProMinimalDeck(
     state: LuminaUiState,
     viewModel: LuminaViewModel,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
@@ -567,40 +473,27 @@ private fun ProStudioDeck(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(LuminaColors.ElevatedSurface)
-            .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(14.dp))
-            .padding(10.dp),
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.Black.copy(alpha = 0.64f))
+            .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Tab Switcher: Exposição | Película | Motor
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(LuminaColors.VoidBg)
-                .padding(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             ProDeckTab.entries.forEach { tab ->
                 val active = state.proDeckTab == tab
-                Box(
+                Text(
+                    text = tab.label,
+                    color = if (active) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    fontSize = 11.sp,
                     modifier = Modifier
-                        .weight(1f)
-                        .defaultMinSize(minHeight = 36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (active) LuminaColors.ElevatedSurface else Color.Transparent)
                         .clickable { viewModel.selectProTab(tab) }
-                        .padding(vertical = 7.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = tab.label,
-                        color = if (active) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
-                }
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                )
             }
         }
 
@@ -615,11 +508,10 @@ private fun ProStudioDeck(
                         text = "EV ${if (state.evIndex >= 0) "+${state.evIndex}" else "${state.evIndex}"}",
                         color = LuminaColors.InkPrimary,
                         fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
                         fontSize = 11.sp
                     )
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("ISO/Obturador Manual", color = LuminaColors.InkSecondary, fontSize = 11.sp)
+                        Text("Manual", color = LuminaColors.InkSecondary, fontSize = 11.sp)
                         Switch(
                             checked = state.manualMode,
                             onCheckedChange = { viewModel.updateManualExposure(it, state.manualIso, state.manualShutterMs) },
@@ -635,10 +527,9 @@ private fun ProStudioDeck(
                 )
                 if (state.manualMode) {
                     Text(
-                        "ISO ${state.manualIso}  ·  1/${(1000f / state.manualShutterMs).toInt().coerceAtLeast(1)}s",
+                        "ISO ${state.manualIso} · 1/${(1000f / state.manualShutterMs).toInt().coerceAtLeast(1)}s",
                         color = LuminaColors.OpticalAmber,
                         fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
                         fontSize = 11.sp
                     )
                     Slider(
@@ -661,36 +552,21 @@ private fun ProStudioDeck(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     FilmStock.entries.forEach { stock ->
                         val selected = state.selectedStock == stock
-                        Column(
+                        Text(
+                            text = stock.displayName,
+                            color = if (selected) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 12.sp,
                             modifier = Modifier
-                                .defaultMinSize(minHeight = 44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (selected) LuminaColors.OpticalAmber.copy(alpha = 0.16f) else LuminaColors.PanelSurface)
-                                .border(
-                                    1.dp,
-                                    if (selected) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
-                                    RoundedCornerShape(10.dp)
-                                )
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (selected) Color.White.copy(alpha = 0.08f) else Color.Transparent)
                                 .clickable { viewModel.selectFilmStock(stock) }
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                text = stock.displayName,
-                                color = if (selected) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp
-                            )
-                            Text(
-                                text = stock.badge,
-                                color = LuminaColors.InkSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 9.sp
-                            )
-                        }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
                     }
                 }
             }
@@ -700,27 +576,21 @@ private fun ProStudioDeck(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     CaptureMode.entries.forEach { mode ->
                         val selected = state.captureMode == mode
-                        Box(
+                        Text(
+                            text = mode.label,
+                            color = if (selected) LuminaColors.VoidBg else LuminaColors.InkPrimary,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 11.sp,
                             modifier = Modifier
-                                .defaultMinSize(minHeight = 38.dp)
                                 .clip(RoundedCornerShape(999.dp))
-                                .background(if (selected) LuminaColors.OpticalAmber else LuminaColors.PanelSurface)
-                                .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(999.dp))
+                                .background(if (selected) LuminaColors.OpticalAmber else Color.White.copy(alpha = 0.08f))
                                 .clickable { viewModel.selectCaptureMode(mode, lifecycleOwner, previewView) }
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = mode.label,
-                                color = if (selected) LuminaColors.VoidBg else LuminaColors.InkPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 11.sp
-                            )
-                        }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
                     }
                 }
                 Row(
@@ -728,27 +598,20 @@ private fun ProStudioDeck(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Limpeza Sombra:", color = LuminaColors.InkSecondary, fontSize = 11.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(1 to "1x Puro", 3 to "3x Padrão", 5 to "5x Noturno").forEach { (n, label) ->
+                    Text("Redução de ruído", color = LuminaColors.InkSecondary, fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(1 to "1x", 3 to "3x", 5 to "5x").forEach { (n, label) ->
                             val active = state.burstCount == n
-                            Box(
+                            Text(
+                                text = label,
+                                color = if (active) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 11.sp,
                                 modifier = Modifier
-                                    .defaultMinSize(minHeight = 36.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (active) LuminaColors.OpticalAmber else LuminaColors.PanelSurface)
                                     .clickable { viewModel.setBurstCount(n) }
-                                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    color = if (active) LuminaColors.VoidBg else LuminaColors.InkPrimary,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp
-                                )
-                            }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
                         }
                     }
                 }
@@ -765,39 +628,28 @@ private fun HardwareDiagnosticsDialog(state: LuminaUiState, onDismiss: () -> Uni
         containerColor = LuminaColors.PanelSurface,
         titleContentColor = LuminaColors.InkPrimary,
         textContentColor = LuminaColors.InkSecondary,
-        title = { Text("Diagnóstico Camera2 / Galaxy A55") },
+        title = { Text("Sensores Galaxy A55") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (profile == null) {
                     Text("Inspecionando câmeras…")
                 } else {
-                    Text("Aparelho: ${profile.deviceModel}", color = LuminaColors.InkPrimary, fontSize = 12.sp)
-                    Text("Hardware: ${profile.socHardware}", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    Text(profile.deviceModel, color = LuminaColors.InkPrimary, fontSize = 12.sp)
                     Text(
-                        if (profile.rawBlockedByFirmware)
-                            "RAW/DNG: Bloqueado pela firmware — operando em resolução máxima JPEG 100% + shaders GPU em blocos."
-                        else
-                            "RAW/DNG: Exposto pela HAL!",
-                        color = LuminaColors.OpticalAmber,
+                        "GPU AGSL: ${if (profile.supportsHardwareRuntimeShader) "Ativo" else "CPU"}",
                         fontSize = 11.sp
                     )
                     Text(
-                        "GPU RuntimeShader AGSL: ${if (profile.supportsHardwareRuntimeShader) "Ativo (Xclipse / API 33+)" else "Indisponível"}",
-                        fontSize = 11.sp
-                    )
-                    Text(
-                        "Extensões Samsung CameraX: ${if (profile.extensionsSupported.isEmpty()) "Nenhuma detectada neste aparelho" else profile.extensionsSupported.joinToString()}",
+                        "Extensões Samsung: ${profile.extensionsSupported.ifEmpty { listOf("Padrão") }.joinToString()}",
                         fontSize = 11.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text("Sensores (${profile.lenses.size}):", color = LuminaColors.InkPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     profile.lenses.forEach { lens ->
                         Text(
-                            "ID ${lens.cameraId} (${lens.facing}) -> ${lens.mappedRole?.label ?: "Aux"}\n" +
-                                "Nível: ${lens.hardwareLevel} · OIS: ${lens.hasOis} · f/${lens.apertures.joinToString()} · ${lens.focalLengthsMm.joinToString()}mm",
+                            "ID ${lens.cameraId} (${lens.facing}) · ${lens.mappedRole?.label ?: "Aux"} · ${lens.hardwareLevel}",
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp
                         )
