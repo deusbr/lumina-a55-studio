@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -39,6 +40,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -63,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,8 +74,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.deusbr.luminaa55.model.CameraExperienceMode
 import dev.deusbr.luminaa55.model.CaptureMode
 import dev.deusbr.luminaa55.model.FilmStock
+import dev.deusbr.luminaa55.model.GeminiOnlineMode
 import dev.deusbr.luminaa55.model.LensOption
 import dev.deusbr.luminaa55.model.ProDeckTab
+import dev.deusbr.luminaa55.model.ProcessingEngine
 
 @Composable
 fun CameraScreen(
@@ -187,42 +193,40 @@ fun CameraScreen(
                 )
             }
 
-            if (isPro) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { viewModel.toggleSessionLock() }, modifier = Modifier.size(36.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                EngineSwitchPill(
+                    activeEngine = state.processingEngine,
+                    hasGeminiKey = state.hasGeminiKey,
+                    onSelectEngine = { viewModel.selectProcessingEngine(it) },
+                    onOpenKeyConfig = { viewModel.openGeminiSettingsDialog(true) }
+                )
+
+                if (isPro) {
+                    IconButton(onClick = { viewModel.toggleSessionLock() }, modifier = Modifier.size(34.dp)) {
                         Icon(
                             if (state.sessionLookLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                             contentDescription = "Travar look",
                             tint = if (state.sessionLookLocked) LuminaColors.OpticalAmber else LuminaColors.InkPrimary.copy(alpha = 0.8f),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(17.dp)
                         )
                     }
-                    IconButton(onClick = { viewModel.toggleGrid() }, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = { viewModel.toggleGrid() }, modifier = Modifier.size(34.dp)) {
                         Icon(
                             Icons.Default.GridOn,
                             contentDescription = "Grade",
                             tint = if (state.showGrid) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(17.dp)
                         )
                     }
-                    IconButton(onClick = { viewModel.toggleDiagnostics(true) }, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = { viewModel.toggleDiagnostics(true) }, modifier = Modifier.size(34.dp)) {
                         Icon(
                             Icons.Default.Info,
                             contentDescription = "Sensores",
                             tint = LuminaColors.InkPrimary.copy(alpha = 0.8f),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(17.dp)
                         )
                     }
                 }
-            } else {
-                Text(
-                    text = "AUTO",
-                    color = LuminaColors.InkPrimary.copy(alpha = 0.72f),
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 10.sp,
-                    letterSpacing = 1.4.sp
-                )
             }
         }
 
@@ -459,6 +463,16 @@ fun CameraScreen(
             onDismiss = { viewModel.toggleDiagnostics(false) }
         )
     }
+
+    if (state.showGeminiSettingsDialog) {
+        GeminiSettingsDialog(
+            state = state,
+            initialKey = viewModel.currentGeminiApiKey(),
+            onSelectMode = { viewModel.selectGeminiOnlineMode(it) },
+            onSaveKey = { viewModel.saveGeminiApiKey(it) },
+            onDismiss = { viewModel.openGeminiSettingsDialog(false) }
+        )
+    }
 }
 
 @Composable
@@ -660,6 +674,156 @@ private fun HardwareDiagnosticsDialog(state: LuminaUiState, onDismiss: () -> Uni
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text("Fechar", color = LuminaColors.OpticalAmber)
+            }
+        }
+    )
+}
+
+@Composable
+internal fun EngineSwitchPill(
+    activeEngine: ProcessingEngine,
+    hasGeminiKey: Boolean,
+    isLoadingOnline: Boolean = false,
+    onSelectEngine: (ProcessingEngine) -> Unit,
+    onOpenKeyConfig: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.Black.copy(alpha = 0.56f))
+            .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(999.dp))
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        ProcessingEngine.entries.forEach { eng ->
+            val selected = activeEngine == eng
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(
+                        when {
+                            selected && eng == ProcessingEngine.ONLINE_GEMINI -> LuminaColors.OpticalAmber
+                            selected -> LuminaColors.StudioEmerald
+                            else -> Color.Transparent
+                        }
+                    )
+                    .clickable(enabled = !isLoadingOnline) { onSelectEngine(eng) }
+                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (isLoadingOnline && eng == ProcessingEngine.ONLINE_GEMINI) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(10.dp),
+                            color = if (selected) LuminaColors.VoidBg else LuminaColors.OpticalAmber,
+                            strokeWidth = 1.5.dp
+                        )
+                    }
+                    Text(
+                        text = eng.shortLabel,
+                        color = if (selected) LuminaColors.VoidBg else LuminaColors.InkPrimary.copy(alpha = 0.85f),
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { onOpenKeyConfig() }
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Key,
+                contentDescription = "Configurar API Gemini",
+                tint = if (hasGeminiKey) LuminaColors.StudioEmerald else LuminaColors.OpticalAmber,
+                modifier = Modifier.size(13.dp)
+            )
+        }
+    }
+}
+
+@Composable
+internal fun GeminiSettingsDialog(
+    state: LuminaUiState,
+    initialKey: String,
+    onSelectMode: (GeminiOnlineMode) -> Unit,
+    onSaveKey: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var keyDraft by remember(initialKey) { mutableStateOf(initialKey) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = LuminaColors.PanelSurface,
+        titleContentColor = LuminaColors.InkPrimary,
+        textContentColor = LuminaColors.InkSecondary,
+        title = { Text("Motor Online · API Gemini", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Escolha como a banca de 6 especialistas (Diretor, Lentes, Iluminação, Guardião e Auditor Anti-IA) usa a API do Gemini:",
+                    fontSize = 12.sp
+                )
+                GeminiOnlineMode.entries.forEach { mode ->
+                    val active = state.geminiOnlineMode == mode
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (active) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.25f))
+                            .border(
+                                1.dp,
+                                if (active) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { onSelectMode(mode) }
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            mode.label,
+                            color = if (active) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp
+                        )
+                        Text(mode.description, color = LuminaColors.InkSecondary, fontSize = 10.sp)
+                    }
+                }
+                OutlinedTextField(
+                    value = keyDraft,
+                    onValueChange = { keyDraft = it },
+                    label = { Text("Chave API Gemini (salva só no aparelho)") },
+                    placeholder = { Text("AIza...") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = LuminaColors.OpticalAmber,
+                        unfocusedBorderColor = LuminaColors.HairlineBorder,
+                        focusedTextColor = LuminaColors.InkPrimary,
+                        unfocusedTextColor = LuminaColors.InkPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = LuminaColors.InkSecondary)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSaveKey(keyDraft) }) {
+                Text("Salvar e Usar", color = LuminaColors.OpticalAmber, fontWeight = FontWeight.Bold)
             }
         }
     )

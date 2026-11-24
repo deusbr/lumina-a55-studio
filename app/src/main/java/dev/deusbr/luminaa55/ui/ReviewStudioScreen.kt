@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -80,6 +81,7 @@ fun ReviewStudioScreen(
     val isPro = state.experienceMode == CameraExperienceMode.PRO
     var compareSplitMode by remember { mutableStateOf(false) }
     var holdingOriginal by remember { mutableStateOf(false) }
+    var showCrewSheet by remember { mutableStateOf(false) }
     var splitRatio by remember { mutableFloatStateOf(0.50f) }
 
     var proMist by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.proMistStrength) }
@@ -164,6 +166,79 @@ fun ReviewStudioScreen(
                         fontSize = 12.sp,
                         maxLines = 1
                     )
+                }
+            }
+        }
+
+        // Engine Switcher (Offline GPU+MODNet vs Online Gemini) + 6-Specialist Channel Crew Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            EngineSwitchPill(
+                activeEngine = session.engineUsed,
+                hasGeminiKey = state.hasGeminiKey,
+                isLoadingOnline = state.isOnlineProcessing,
+                onSelectEngine = { viewModel.applySelectedEngineToActiveSession(it) },
+                onOpenKeyConfig = { viewModel.openGeminiSettingsDialog(true) }
+            )
+
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (showCrewSheet) LuminaColors.OpticalAmber.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.06f))
+                    .border(
+                        1.dp,
+                        if (showCrewSheet) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                        RoundedCornerShape(999.dp)
+                    )
+                    .clickable { showCrewSheet = !showCrewSheet }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Icon(
+                    Icons.Default.Groups,
+                    contentDescription = "Banca do Canal",
+                    tint = if (showCrewSheet) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = "Banca (6)",
+                    color = if (showCrewSheet) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        if (showCrewSheet) {
+            val crew = session.concept.crewSheet
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(LuminaColors.PanelSurface)
+                    .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (crew != null) {
+                    Text(crew.directorDecision, color = LuminaColors.InkPrimary, fontSize = 11.sp)
+                    Text(crew.forensicDiagnosis, color = LuminaColors.InkSecondary, fontSize = 10.sp)
+                    Text("Lente: ${crew.cameraLensSpec}", color = LuminaColors.OpticalAmber, fontSize = 10.sp)
+                    Text(crew.lightingPlan, color = LuminaColors.InkSecondary, fontSize = 10.sp)
+                    Text(crew.consistencyGuardLock, color = LuminaColors.InkSecondary, fontSize = 10.sp)
+                    Text(crew.antiAiAuditStatus, color = LuminaColors.StudioEmerald, fontSize = 10.sp)
+                } else {
+                    Text("Ficha da Banca: ${session.concept.conceptSummary}", color = LuminaColors.InkSecondary, fontSize = 11.sp)
+                }
+                session.onlineNotes?.let { note ->
+                    Text(note, color = LuminaColors.OpticalAmber, fontSize = 10.sp, fontWeight = FontWeight.Medium)
                 }
             }
         }
@@ -402,6 +477,16 @@ fun ReviewStudioScreen(
                 }
             }
         }
+    }
+
+    if (state.showGeminiSettingsDialog) {
+        GeminiSettingsDialog(
+            state = state,
+            initialKey = viewModel.currentGeminiApiKey(),
+            onSelectMode = { viewModel.selectGeminiOnlineMode(it) },
+            onSaveKey = { viewModel.saveGeminiApiKey(it) },
+            onDismiss = { viewModel.openGeminiSettingsDialog(false) }
+        )
     }
 }
 

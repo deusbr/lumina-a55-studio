@@ -127,23 +127,31 @@ object EditorialShaderEngine {
             if (hasDepthMap > 0.5) {
                 float depthCoc = clamp(float(depthMap.eval(uv * depthSize).g), 0.0, 1.0);
                 if (hasSubjectMask > 0.5) {
-                    float combinedBg = max(depthCoc * 0.85, segBg);
-                    return combinedBg * clamp((1.0 - fg) * 1.18, 0.0, 1.0);
+                    float combinedBg = max(depthCoc * 0.72, segBg);
+                    return combinedBg * (1.0 - smoothstep(0.55, 0.96, fg));
                 }
                 return depthCoc;
             }
-            return smoothstep(0.08, 0.92, segBg);
+            return smoothstep(0.04, 0.90, segBg);
         }
 
-        float3 applyStudioBackdrop(float3 col, float2 uv, float2 asp, float weightBg) {
-            if (studioBackdropStrength <= 0.01 || weightBg <= 0.005) return col;
+        float3 applyStudioBackdrop(float3 col, float2 uv, float2 asp, float weightBg, float fgVal) {
+            if (weightBg <= 0.005) return col;
+            // Color-decontaminate bright background spill along hair/shoulder edges (stops white aura fringe)
+            float edgeZone = smoothstep(0.05, 0.45, fgVal) * (1.0 - smoothstep(0.50, 0.92, fgVal));
+            float lum = luma(col);
+            float bleed = clamp((lum - 0.38) * 1.5, 0.0, 1.0) * edgeZone;
+            float3 cleanCol = mix(col, col * 0.58, bleed);
+
+            if (studioBackdropStrength <= 0.01) return cleanCol;
             float2 haloCenter = hasFace > 0.5 ? faceCenter : float2(0.5, 0.42);
             float dHalo = length((uv - haloCenter) * asp);
-            float haloGrad = exp(-dHalo * dHalo * 3.0);
-            float3 studioCyclorama = mix(float3(0.068, 0.065, 0.063), float3(0.185, 0.178, 0.170), haloGrad);
-            float3 moodyBg = mix(col * 0.42, studioCyclorama, 0.48);
-            float bgAlpha = clamp(weightBg * studioBackdropStrength, 0.0, 1.0);
-            return mix(col, moodyBg, bgAlpha);
+            float haloGrad = exp(-dHalo * dHalo * 2.6);
+            // Kelvin-separated moody slate backdrop (6200K outer vignette, natural falloff near halo)
+            float3 studioNeutral = mix(float3(0.085, 0.088, 0.096), float3(0.20, 0.195, 0.192), haloGrad);
+            float3 moodyBg = mix(cleanCol * 0.52, studioNeutral, 0.36);
+            float bgAlpha = clamp(pow(weightBg, 0.80) * studioBackdropStrength, 0.0, 1.0);
+            return mix(cleanCol, moodyBg, bgAlpha);
         }
 
         half4 main(float2 fragCoord) {
@@ -159,10 +167,10 @@ object EditorialShaderEngine {
             float bgWeight = sampleBokehWeight(globalCoord);
 
             half4 baseSample = inputImage.eval(fragCoord);
-            float3 centerBackdropRgb = applyStudioBackdrop(float3(baseSample.rgb), uv, asp, bgWeight);
+            float3 centerBackdropRgb = applyStudioBackdrop(float3(baseSample.rgb), uv, asp, bgWeight, fgMask);
             float3 rgb = centerBackdropRgb;
 
-            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (pre-toned backdrop eliminates bright-wall hair halos)
+            // 1. Creamy 24-Tap Vogel Golden-Angle Optical Bokeh (pre-decontaminated taps prevent edge halo bleed)
             if (backgroundBokeh > 0.01 && bgWeight > 0.015) {
                 float radius = bgWeight * backgroundBokeh * clamp(minDim * 0.022, 10.0, 52.0);
                 float3 acc = centerBackdropRgb;
@@ -175,14 +183,14 @@ object EditorialShaderEngine {
                     float2 off = float2(cos(ang), sin(ang)) * (rFrac * radius);
                     float2 tapGlobal = globalCoord + off;
                     float2 tapUv = clamp(tapGlobal / max(fullImageSize, float2(1.0)), float2(0.0), float2(1.0));
-                    float tapBgWeight = sampleBokehWeight(tapGlobal);
-                    float3 tapCol = applyStudioBackdrop(float3(inputImage.eval(fragCoord + off).rgb), tapUv, asp, tapBgWeight);
                     float sf = hasSubjectMask > 0.5 ? clamp(sampleSemantic(tapGlobal).r, 0.0, 1.0) : 0.0;
-                    float w = 1.0 - smoothstep(0.30, 0.85, sf);
+                    float tapBgWeight = sampleBokehWeight(tapGlobal);
+                    float3 tapCol = applyStudioBackdrop(float3(inputImage.eval(fragCoord + off).rgb), tapUv, asp, tapBgWeight, sf);
+                    float w = 1.0 - smoothstep(0.28, 0.82, sf);
                     acc += tapCol * w;
                     weightSum += w;
                 }
-                rgb = mix(centerBackdropRgb, acc / max(weightSum, 0.001), smoothstep(0.015, 0.85, bgWeight));
+                rgb = mix(centerBackdropRgb, acc / max(weightSum, 0.001), smoothstep(0.02, 0.82, bgWeight));
             }
 
             // 2. Apply Zero-DCE Neural Gain Map ONLY when genuinely dark scene triggered it
@@ -210,7 +218,7 @@ object EditorialShaderEngine {
                 }
             }
 
-            // 3. Frequency-Separated Studio Skin Polish + Crisp Hair/Eyes/Glasses/Fabric Acutance
+            // 3. Anti-AI Realism Clarity (ZERO plastic skin blur! Keeps pores/beard real while clearing glasses/lens fog)
             float blurFine = clamp(minDim * 0.0018, 1.4, 4.0);
             float3 localFine = (
                 float3(inputImage.eval(fragCoord + float2(blurFine, 0.0)).rgb) +
@@ -219,22 +227,22 @@ object EditorialShaderEngine {
                 float3(inputImage.eval(fragCoord - float2(0.0, blurFine)).rgb)
             ) * 0.25;
 
-            if (activeSkin > 0.12 && eyeKeepSharp < 0.75) {
-                float blurWide = blurFine * 2.5;
-                float3 localWide = (
-                    float3(inputImage.eval(fragCoord + float2(blurWide, 0.0)).rgb) +
-                    float3(inputImage.eval(fragCoord - float2(blurWide, 0.0)).rgb) +
-                    float3(inputImage.eval(fragCoord + float2(0.0, blurWide)).rgb) +
-                    float3(inputImage.eval(fragCoord - float2(0.0, blurWide)).rgb)
-                ) * 0.25;
-                float3 smoothedSkin = clamp(localWide + (rgb - localFine) * 0.92, float3(0.0), float3(1.0));
-                rgb = mix(rgb, smoothedSkin, activeSkin * 0.22 * (1.0 - eyeKeepSharp));
-            }
+            float blurWide = clamp(minDim * 0.0085, 6.0, 22.0);
+            float3 localWide = (
+                float3(inputImage.eval(fragCoord + float2(blurWide, 0.0)).rgb) +
+                float3(inputImage.eval(fragCoord - float2(blurWide, 0.0)).rgb) +
+                float3(inputImage.eval(fragCoord + float2(0.0, blurWide)).rgb) +
+                float3(inputImage.eval(fragCoord - float2(0.0, blurWide)).rgb)
+            ) * 0.25;
 
-            // Sharp crisp acutance on eyes, hair, beard, glasses, clothes (never sharpen mask boundary seams or skin pores)
-            float skinDamp = activeSkin * 0.80 * (1.0 - eyeKeepSharp);
-            float interiorGuard = smoothstep(0.40, 0.90, fgMask) * (1.0 - bgWeight);
-            float acutance = (clarity + 0.08 + detailMask * 0.16 + eyeKeepSharp * 0.14) * (1.0 - skinDamp) * interiorGuard;
+            float interiorGuard = smoothstep(0.45, 0.90, fgMask) * (1.0 - bgWeight);
+            // Medium-frequency local contrast cuts optical fog off eyes, glasses lenses, skin & fabric without plastic artifacts
+            float localFogClarity = (0.14 + eyeKeepSharp * 0.14) * interiorGuard;
+            rgb = clamp(rgb + (rgb - localWide) * localFogClarity, float3(0.0), float3(1.0));
+
+            // Fine crisp acutance strictly on eyes, hair, beard, glasses, clothes (never over-sharpening skin pores)
+            float skinDamp = activeSkin * 0.88 * (1.0 - eyeKeepSharp);
+            float acutance = (clarity * 0.85 + 0.06 + detailMask * 0.14 + eyeKeepSharp * 0.14) * (1.0 - skinDamp) * interiorGuard;
             rgb = clamp(rgb + (rgb - localFine) * acutance, float3(0.0), float3(1.0));
 
             // Optional Pro-Mist & Halation (zero by default in Studio/Normal mode; active only when requested)

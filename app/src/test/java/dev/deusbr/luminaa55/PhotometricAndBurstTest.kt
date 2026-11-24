@@ -3,8 +3,10 @@ package dev.deusbr.luminaa55
 import dev.deusbr.luminaa55.camera.MultiFrameBurstProcessor
 import dev.deusbr.luminaa55.context.NeuralStudioEngine
 import dev.deusbr.luminaa55.context.PhotometricAnalyzer
+import dev.deusbr.luminaa55.context.PhotographyCrewDirector
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.LightDirection
+import dev.deusbr.luminaa55.model.ProcessingEngine
 import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -238,5 +240,56 @@ class PhotometricAndBurstTest {
         assertEquals("Landscape sky must keep backdrop cyclorama disabled", 0f, skyLandscape.recipe.studioBackdropStrength, 0.001f)
         assertEquals("Landscape sky must keep background sharp (no portrait bokeh)", 0f, skyLandscape.recipe.backgroundBokeh, 0.001f)
         assertTrue("Landscape sky must recover highlights", skyLandscape.recipe.skyRecovery >= 0.50f)
+    }
+
+    @Test
+    fun guidedFilterSnapsAlphaBoundaryToLuminanceEdgeWithoutHaloBleed() {
+        val w = 16
+        val h = 16
+        val luma = FloatArray(w * h)
+        val blurryAlpha = FloatArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                luma[i] = if (x < 8) 0.15f else 0.88f
+                blurryAlpha[i] = when {
+                    x <= 5 -> 1.0f
+                    x >= 10 -> 0.0f
+                    else -> (10 - x) / 5f
+                }
+            }
+        }
+        val refined = NeuralStudioEngine.refineAlphaGuided(blurryAlpha, luma, w, h, radius = 2, eps = 0.002f)
+        assertTrue("Dark subject side x=7 (${refined[8 * w + 7]}) must stay foreground > 0.70", refined[8 * w + 7] > 0.70f)
+        assertTrue("Bright background x=9 (${refined[8 * w + 9]}) must stay background < 0.25", refined[8 * w + 9] < 0.25f)
+    }
+
+    @Test
+    fun photographyCrewDirectorCompilesChannelStructureWithAntiAiLocks() {
+        val px = solidFrame(32, 32, 118, 114, 108)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
+        val concept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person", "Portrait"),
+            faceCount = 1,
+            subjectRatio = 0.55f,
+            userSelectedStock = FilmStock.AUTO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        val sheet = PhotographyCrewDirector.compileCrewSheet(
+            concept = concept,
+            stats = stats,
+            labels = listOf("Person"),
+            faceCount = 1,
+            engine = ProcessingEngine.OFFLINE_LOCAL,
+            hasNeuralAlpha = true
+        )
+        assertTrue(sheet.cameraLensSpec.contains("85mm"))
+        assertTrue(sheet.lightingPlan.contains("Negative Fill"))
+        assertTrue(sheet.antiAiAuditStatus.contains("MODNet 512"))
+
+        val prompt = PhotographyCrewDirector.buildGeminiGenerativePrompt(sheet, concept)
+        assertTrue(prompt.contains("STRICT PRESERVATION RULE"))
+        assertTrue(prompt.contains("FORBIDDEN aesthetics: plastic/waxy skin"))
     }
 }

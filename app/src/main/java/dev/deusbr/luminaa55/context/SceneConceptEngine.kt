@@ -18,6 +18,7 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import dev.deusbr.luminaa55.model.AutoLiveDecision
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.PhotometricStats
+import dev.deusbr.luminaa55.model.ProcessingEngine
 import dev.deusbr.luminaa55.model.SceneConcept
 import dev.deusbr.luminaa55.model.StudioLightingHint
 import kotlinx.coroutines.Dispatchers
@@ -91,7 +92,8 @@ class SceneConceptEngine(private val context: Context) {
 
     suspend fun analyze(
         bitmap: Bitmap,
-        selectedStock: FilmStock = FilmStock.AUTO_EDITORIAL
+        selectedStock: FilmStock = FilmStock.AUTO_EDITORIAL,
+        engine: ProcessingEngine = ProcessingEngine.OFFLINE_LOCAL
     ): ConceptAnalysisOutput = withContext(Dispatchers.Default) {
         val analysisBmp = scaleDown(bitmap, 512)
         val inputImage = InputImage.fromBitmap(analysisBmp, 0)
@@ -125,9 +127,18 @@ class SceneConceptEngine(private val context: Context) {
 
         val photoStats = PhotometricAnalyzer.analyzeArgbPixels(pixels, analysisBmp.width, analysisBmp.height, faceCx, faceCy)
 
-        // Run bundled deep neural studio engine (Zero-DCE + MiDaS Depth + Multi-Class Portrait Seg)
+        // Run bundled deep neural studio engine (MODNet 512 Guided + MultiClassSeg + MiDaS Depth + Zero-DCE)
+        val hasSkyHint = labels.any {
+            val l = it.lowercase()
+            l.contains("sky") || l.contains("mountain") || l.contains("landscape")
+        } && faces.isEmpty()
         val neuralDeferred = async {
-            neuralEngine.inferStudioMaps(analysisBmp, photoStats.meanLuma, photoStats.shadowRatio)
+            neuralEngine.inferStudioMaps(
+                source = analysisBmp,
+                meanLuma = photoStats.meanLuma,
+                shadowRatio = photoStats.shadowRatio,
+                preferPortraitMatting = !hasSkyHint
+            )
         }
         val subjectSegBmp = subjectSegDeferred.await()
         val neuralMaps = neuralDeferred.await()
@@ -158,8 +169,14 @@ class SceneConceptEngine(private val context: Context) {
             StudioLightingHint()
         }
 
-        // Priority: Multi-class semantic portrait map (has hair/skin/clothes!), else Play Services Subject Seg, else Selfie Seg
+        // Priority: MODNet 512px Guided Alpha (hair-strand accurate), else Play Services SubjectSeg, else MultiClassSeg 256, else SelfieSeg
         val candidateSemantic = when {
+            neuralMaps.hasConfidentSemantic && neuralMaps.hasModNetAlpha && neuralMaps.semanticBitmap != null -> {
+                subjectSegBmp?.recycle()
+                selfieFallbackDeferred?.recycle()
+                // Guided Filter at 512px already hugs real RGB edges without aura: upscale bilinearly cleanly, no wide blur!
+                upscaleSmoothMask(neuralMaps.semanticBitmap, 768)
+            }
             neuralMaps.hasConfidentSemantic && neuralMaps.semanticBitmap != null -> {
                 subjectSegBmp?.recycle()
                 selfieFallbackDeferred?.recycle()
@@ -168,7 +185,7 @@ class SceneConceptEngine(private val context: Context) {
             subjectSegBmp != null -> {
                 neuralMaps.semanticBitmap?.recycle()
                 selfieFallbackDeferred?.recycle()
-                smoothMaskEdges(upscaleSmoothMask(subjectSegBmp, 640))
+                upscaleSmoothMask(subjectSegBmp, 768)
             }
             selfieFallbackDeferred != null -> {
                 neuralMaps.semanticBitmap?.recycle()
@@ -181,7 +198,7 @@ class SceneConceptEngine(private val context: Context) {
         }
 
         val coverage = if (candidateSemantic != null) estimateMaskCoverage(candidateSemantic) else 1.0f
-        val hasMask = candidateSemantic != null && coverage in 0.05f..0.92f
+        val hasMask = candidateSemantic != null && coverage in 0.04f..0.94f
         val finalSemanticMask = if (hasMask && candidateSemantic != null) {
             candidateSemantic
         } else {
@@ -201,6 +218,9 @@ class SceneConceptEngine(private val context: Context) {
         )
 
         val extraNotes = baseConcept.appliedAdjustments.toMutableList()
+        if ("MODNet-Guided" in neuralMaps.modelsExecuted && hasMask) {
+            extraNotes.add("Matting MODNet 512 px + Guided Filter (contorno preciso)")
+        }
         if (neuralMaps.hasDepthMap && !extraNotes.any { it.contains("Profundidade", ignoreCase = true) }) {
             extraNotes.add("Profundidade 3D MiDaS para bokeh progressivo")
         }
@@ -211,10 +231,20 @@ class SceneConceptEngine(private val context: Context) {
             extraNotes.add("Separação IA pele / cabelo / roupa")
         }
 
+        val crewSheet = PhotographyCrewDirector.compileCrewSheet(
+            concept = baseConcept,
+            stats = photoStats,
+            labels = labels,
+            faceCount = faces.size,
+            engine = engine,
+            hasNeuralAlpha = neuralMaps.hasModNetAlpha
+        )
+
         val finalConcept = baseConcept.copy(
             hasDepthMap = neuralMaps.hasDepthMap,
             neuralBoostStrength = NeuralStudioEngine.computeZeroDceAdaptiveMix(photoStats.meanLuma, photoStats.shadowRatio),
-            appliedAdjustments = extraNotes
+            appliedAdjustments = extraNotes,
+            crewSheet = crewSheet
         )
 
         ConceptAnalysisOutput(

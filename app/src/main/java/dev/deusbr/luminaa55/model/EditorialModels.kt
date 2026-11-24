@@ -2,6 +2,51 @@ package dev.deusbr.luminaa55.model
 
 import android.graphics.Bitmap
 
+enum class ProcessingEngine(
+    val label: String,
+    val shortLabel: String,
+    val subtitle: String
+) {
+    OFFLINE_LOCAL("Offline · GPU + MODNet", "Offline", "100% local · Zero nuvem"),
+    ONLINE_GEMINI("Online · Gemini Estúdio", "Gemini", "Banca do canal + API Gemini")
+}
+
+enum class GeminiOnlineMode(
+    val modelId: String,
+    val label: String,
+    val description: String,
+    val outputsImageDirectly: Boolean
+) {
+    VISION_CREW_DIRECTOR(
+        modelId = "gemini-3.8-flash",
+        label = "Gemini Diretor + GPU",
+        description = "Banca de 6 especialistas analisa a foto na nuvem e calibra a GPU local",
+        outputsImageDirectly = false
+    ),
+    STUDIO_IMAGE_FLASH(
+        modelId = "gemini-3.1-flash-image-preview",
+        label = "Gemini Flash Image",
+        description = "Gera revelação completa em estúdio na nuvem (requer cota de imagem na chave)",
+        outputsImageDirectly = true
+    ),
+    STUDIO_IMAGE_PRO(
+        modelId = "gemini-3-pro-image-preview",
+        label = "Gemini Pro Image",
+        description = "Máxima fidelidade fotográfica na nuvem (requer cota de imagem na chave)",
+        outputsImageDirectly = true
+    )
+}
+
+data class PhotographyCrewSheet(
+    val directorDecision: String,
+    val forensicDiagnosis: String,
+    val cameraLensSpec: String,
+    val lightingPlan: String,
+    val consistencyGuardLock: String,
+    val antiAiAuditStatus: String,
+    val engineUsedLabel: String
+)
+
 enum class CameraExperienceMode(val label: String) {
     NORMAL("Normal"),
     PRO("Pro")
@@ -143,7 +188,8 @@ data class SceneConcept(
     val recommendedStock: FilmStock,
     val recommendedBurstCount: Int = 3,
     val appliedAdjustments: List<String>,
-    val recipe: EditRecipe
+    val recipe: EditRecipe,
+    val crewSheet: PhotographyCrewSheet? = null
 )
 
 data class AutoLiveDecision(
@@ -176,5 +222,7 @@ data class CapturedPhotoSession(
     val cachedStats: PhotometricStats? = null,
     val cachedLabels: List<String> = emptyList(),
     val cachedFaceCount: Int = 0,
-    val hasConfidentMask: Boolean = true
+    val hasConfidentMask: Boolean = true,
+    val engineUsed: ProcessingEngine = ProcessingEngine.OFFLINE_LOCAL,
+    val onlineNotes: String? = null
 )

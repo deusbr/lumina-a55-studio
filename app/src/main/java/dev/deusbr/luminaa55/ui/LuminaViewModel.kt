@@ -17,8 +17,11 @@ import dev.deusbr.luminaa55.model.CameraHardwareProfile
 import dev.deusbr.luminaa55.model.CaptureMode
 import dev.deusbr.luminaa55.model.CapturedPhotoSession
 import dev.deusbr.luminaa55.model.FilmStock
+import dev.deusbr.luminaa55.model.GeminiOnlineMode
 import dev.deusbr.luminaa55.model.LensOption
 import dev.deusbr.luminaa55.model.ProDeckTab
+import dev.deusbr.luminaa55.model.ProcessingEngine
+import dev.deusbr.luminaa55.online.GeminiStudioService
 import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,7 +62,12 @@ data class LuminaUiState(
     val hardwareProfile: CameraHardwareProfile? = null,
     val studioSessions: List<CapturedPhotoSession> = emptyList(),
     val activeSession: CapturedPhotoSession? = null,
-    val editIntensity: Float = 1.0f
+    val editIntensity: Float = 1.0f,
+    val processingEngine: ProcessingEngine = ProcessingEngine.OFFLINE_LOCAL,
+    val geminiOnlineMode: GeminiOnlineMode = GeminiOnlineMode.VISION_CREW_DIRECTOR,
+    val hasGeminiKey: Boolean = false,
+    val showGeminiSettingsDialog: Boolean = false,
+    val isOnlineProcessing: Boolean = false
 )
 
 private data class QueuedShot(
@@ -68,18 +76,21 @@ private data class QueuedShot(
     val lens: LensOption,
     val isPro: Boolean,
     val manualBurstCount: Int,
-    val captureMode: CaptureMode
+    val captureMode: CaptureMode,
+    val engine: ProcessingEngine,
+    val geminiMode: GeminiOnlineMode
 )
 
 class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     val cameraController = CameraController(app)
     private val conceptEngine = SceneConceptEngine(app)
+    private val geminiService = GeminiStudioService(app)
     private val processingQueue = Channel<QueuedShot>(Channel.UNLIMITED)
     private var reprocessJob: Job? = null
     private var hintSamplerJob: Job? = null
 
-    private val _uiState = MutableStateFlow(LuminaUiState())
+    private val _uiState = MutableStateFlow(LuminaUiState(hasGeminiKey = geminiService.hasApiKey()))
     val uiState: StateFlow<LuminaUiState> = _uiState.asStateFlow()
 
     init {
@@ -108,7 +119,12 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun processQueuedShot(job: QueuedShot) {
         val startMs = System.currentTimeMillis()
-        val analysis = conceptEngine.analyze(job.raw.fullResBitmap, job.stock)
+        val effectiveEngine = if (job.engine == ProcessingEngine.ONLINE_GEMINI && geminiService.hasApiKey()) {
+            ProcessingEngine.ONLINE_GEMINI
+        } else {
+            ProcessingEngine.OFFLINE_LOCAL
+        }
+        val analysis = conceptEngine.analyze(job.raw.fullResBitmap, job.stock, effectiveEngine)
         // Skip heavy single-frame spatial blur when true multi-frame burst already merged >=2 frames
         val denoiseLevel = if (job.raw.framesDenoised >= 2) {
             1
@@ -129,22 +145,68 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             job.raw.fullResBitmap.recycle()
         }
 
-        val renderedFullRes = EditorialShaderEngine.renderEditorial(
-            source = denoisedFullRes,
-            subjectMask = analysis.subjectMask,
-            depthMap = analysis.depthMap,
-            neuralGainMap = analysis.neuralGainMap,
-            lightingHint = analysis.lightingHint,
-            recipe = analysis.concept.recipe,
-            intensity = 1.0f,
-            hasConfidentMask = analysis.hasConfidentMask
-        )
+        var usedConcept = analysis.concept
+        var onlineNote: String? = null
+        val renderedFullRes = if (effectiveEngine == ProcessingEngine.ONLINE_GEMINI) {
+            val onlineRes = runCatching {
+                geminiService.enhanceWithGemini(
+                    sourceBitmap = denoisedFullRes,
+                    baseConcept = analysis.concept,
+                    stats = analysis.stats,
+                    labels = analysis.labels,
+                    faceCount = analysis.faceCount,
+                    mode = job.geminiMode,
+                    hasNeuralAlpha = "MODNet-Guided" in analysis.aiModelsUsed
+                )
+            }.getOrNull()
+            if (onlineRes != null) {
+                usedConcept = onlineRes.calibratedConcept
+                onlineNote = onlineRes.statusNote
+                if (onlineRes.generatedBitmap != null) {
+                    dev.deusbr.luminaa55.shader.ShaderRenderResult(onlineRes.generatedBitmap, gpuAccelerated = true)
+                } else {
+                    EditorialShaderEngine.renderEditorial(
+                        source = denoisedFullRes,
+                        subjectMask = analysis.subjectMask,
+                        depthMap = analysis.depthMap,
+                        neuralGainMap = analysis.neuralGainMap,
+                        lightingHint = analysis.lightingHint,
+                        recipe = usedConcept.recipe,
+                        intensity = 1.0f,
+                        hasConfidentMask = analysis.hasConfidentMask
+                    )
+                }
+            } else {
+                onlineNote = "Sem conexão Gemini — renderizado no Motor Offline."
+                EditorialShaderEngine.renderEditorial(
+                    source = denoisedFullRes,
+                    subjectMask = analysis.subjectMask,
+                    depthMap = analysis.depthMap,
+                    neuralGainMap = analysis.neuralGainMap,
+                    lightingHint = analysis.lightingHint,
+                    recipe = analysis.concept.recipe,
+                    intensity = 1.0f,
+                    hasConfidentMask = analysis.hasConfidentMask
+                )
+            }
+        } else {
+            EditorialShaderEngine.renderEditorial(
+                source = denoisedFullRes,
+                subjectMask = analysis.subjectMask,
+                depthMap = analysis.depthMap,
+                neuralGainMap = analysis.neuralGainMap,
+                lightingHint = analysis.lightingHint,
+                recipe = analysis.concept.recipe,
+                intensity = 1.0f,
+                hasConfidentMask = analysis.hasConfidentMask
+            )
+        }
 
         val uiOrigPreview = cameraController.createUiPreviewBitmap(denoisedFullRes, 1800)
         val uiProcPreview = cameraController.createUiPreviewBitmap(renderedFullRes.bitmap, 1800)
 
         val savedUri = runCatching {
-            cameraController.saveBitmapToGallery(renderedFullRes.bitmap, job.raw.exifBytes, analysis.concept.conceptTitle)
+            cameraController.saveBitmapToGallery(renderedFullRes.bitmap, job.raw.exifBytes, usedConcept.conceptTitle)
         }.getOrNull()
 
         val session = CapturedPhotoSession(
@@ -157,7 +219,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             processedBitmap = renderedFullRes.bitmap,
             previewProcessedBitmap = uiProcPreview,
             exifBytes = job.raw.exifBytes,
-            concept = analysis.concept,
+            concept = usedConcept,
             aiModelsUsed = analysis.aiModelsUsed,
             burstFramesMerged = framesUsed,
             gpuAccelerated = renderedFullRes.gpuAccelerated,
@@ -169,7 +231,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             cachedStats = analysis.stats,
             cachedLabels = analysis.labels,
             cachedFaceCount = analysis.faceCount,
-            hasConfidentMask = analysis.hasConfidentMask
+            hasConfidentMask = analysis.hasConfidentMask,
+            engineUsed = effectiveEngine,
+            onlineNotes = onlineNote
         )
 
         _uiState.update { cur ->
@@ -316,6 +380,177 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         else cameraController.applyManualIsoShutter(null, null)
     }
 
+    fun selectProcessingEngine(engine: ProcessingEngine) {
+        if (engine == ProcessingEngine.ONLINE_GEMINI && !geminiService.hasApiKey()) {
+            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+            return
+        }
+        _uiState.update { it.copy(processingEngine = engine) }
+        if (_uiState.value.activeSession != null) {
+            applySelectedEngineToActiveSession(engine)
+        }
+    }
+
+    fun selectGeminiOnlineMode(mode: GeminiOnlineMode) {
+        _uiState.update { it.copy(geminiOnlineMode = mode) }
+    }
+
+    fun openGeminiSettingsDialog(open: Boolean) {
+        _uiState.update { it.copy(showGeminiSettingsDialog = open) }
+    }
+
+    fun currentGeminiApiKey(): String = geminiService.getSavedApiKey()
+
+    fun saveGeminiApiKey(rawKey: String) {
+        geminiService.saveApiKey(rawKey)
+        val hasKey = geminiService.hasApiKey()
+        _uiState.update {
+            it.copy(
+                hasGeminiKey = hasKey,
+                showGeminiSettingsDialog = false,
+                processingEngine = if (hasKey) ProcessingEngine.ONLINE_GEMINI else ProcessingEngine.OFFLINE_LOCAL,
+                statusMessage = if (hasKey) "Chave Gemini salva no aparelho (privada)." else "Chave Gemini removida — usando Motor Offline."
+            )
+        }
+        if (hasKey && _uiState.value.activeSession != null) {
+            applySelectedEngineToActiveSession(ProcessingEngine.ONLINE_GEMINI)
+        }
+    }
+
+    fun applySelectedEngineToActiveSession(engine: ProcessingEngine) {
+        val session = _uiState.value.activeSession ?: return
+        val state = _uiState.value
+        if (engine == ProcessingEngine.ONLINE_GEMINI && !geminiService.hasApiKey()) {
+            _uiState.update { it.copy(showGeminiSettingsDialog = true) }
+            return
+        }
+
+        reprocessJob?.cancel()
+        reprocessJob = viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            val stats = session.cachedStats
+            if (engine == ProcessingEngine.OFFLINE_LOCAL || stats == null) {
+                val baseConcept = if (stats != null) {
+                    val offlineBase = PhotometricAnalyzer.buildConceptProfile(
+                        stats = stats,
+                        labels = session.cachedLabels,
+                        faceCount = session.cachedFaceCount,
+                        subjectRatio = session.concept.subjectRatio,
+                        userSelectedStock = state.selectedStock,
+                        hasConfidentMask = session.hasConfidentMask
+                    )
+                    val crew = dev.deusbr.luminaa55.context.PhotographyCrewDirector.compileCrewSheet(
+                        concept = offlineBase,
+                        stats = stats,
+                        labels = session.cachedLabels,
+                        faceCount = session.cachedFaceCount,
+                        engine = ProcessingEngine.OFFLINE_LOCAL,
+                        hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                    )
+                    offlineBase.copy(crewSheet = crew)
+                } else session.concept
+                val rendered = withContext(Dispatchers.Default) {
+                    EditorialShaderEngine.renderEditorial(
+                        source = session.previewOriginalBitmap,
+                        subjectMask = session.subjectMaskBitmap,
+                        depthMap = session.depthMapBitmap,
+                        neuralGainMap = session.neuralGainBitmap,
+                        lightingHint = session.lightingHint,
+                        recipe = baseConcept.recipe,
+                        intensity = state.editIntensity,
+                        hasConfidentMask = session.hasConfidentMask
+                    )
+                }
+                _uiState.update { cur ->
+                    val next = session.copy(
+                        previewProcessedBitmap = rendered.bitmap,
+                        concept = baseConcept,
+                        gpuAccelerated = rendered.gpuAccelerated,
+                        processingTimeMs = System.currentTimeMillis() - startMs,
+                        fullResMatchesCurrentRecipe = false,
+                        savedUriString = null,
+                        engineUsed = ProcessingEngine.OFFLINE_LOCAL,
+                        onlineNotes = null
+                    )
+                    cur.copy(
+                        processingEngine = ProcessingEngine.OFFLINE_LOCAL,
+                        activeSession = next,
+                        studioSessions = cur.studioSessions.map { if (it.id == next.id) next else it },
+                        statusMessage = "Motor Offline (MODNet + GPU) aplicado."
+                    )
+                }
+                return@launch
+            }
+
+            _uiState.update { it.copy(isOnlineProcessing = true, statusMessage = "Banca Fotográfica + Gemini analisando na nuvem…") }
+            runCatching {
+                geminiService.enhanceWithGemini(
+                    sourceBitmap = session.originalBitmap,
+                    baseConcept = session.concept,
+                    stats = stats,
+                    labels = session.cachedLabels,
+                    faceCount = session.cachedFaceCount,
+                    mode = state.geminiOnlineMode,
+                    hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                )
+            }.onSuccess { onlineRes ->
+                val fullResBmp: Bitmap
+                val previewBmp: Bitmap
+                val isGpu: Boolean
+                if (onlineRes.generatedBitmap != null) {
+                    fullResBmp = onlineRes.generatedBitmap
+                    previewBmp = withContext(Dispatchers.Default) {
+                        cameraController.createUiPreviewBitmap(fullResBmp, 1800)
+                    }
+                    isGpu = true
+                } else {
+                    val renderedPreview = withContext(Dispatchers.Default) {
+                        EditorialShaderEngine.renderEditorial(
+                            source = session.previewOriginalBitmap,
+                            subjectMask = session.subjectMaskBitmap,
+                            depthMap = session.depthMapBitmap,
+                            neuralGainMap = session.neuralGainBitmap,
+                            lightingHint = session.lightingHint,
+                            recipe = onlineRes.calibratedConcept.recipe,
+                            intensity = state.editIntensity,
+                            hasConfidentMask = session.hasConfidentMask
+                        )
+                    }
+                    fullResBmp = session.processedBitmap
+                    previewBmp = renderedPreview.bitmap
+                    isGpu = renderedPreview.gpuAccelerated
+                }
+                _uiState.update { cur ->
+                    val next = session.copy(
+                        processedBitmap = fullResBmp,
+                        previewProcessedBitmap = previewBmp,
+                        concept = onlineRes.calibratedConcept,
+                        gpuAccelerated = isGpu,
+                        processingTimeMs = System.currentTimeMillis() - startMs,
+                        fullResMatchesCurrentRecipe = onlineRes.usedGenerativeImage,
+                        savedUriString = null,
+                        engineUsed = ProcessingEngine.ONLINE_GEMINI,
+                        onlineNotes = onlineRes.statusNote
+                    )
+                    cur.copy(
+                        isOnlineProcessing = false,
+                        processingEngine = ProcessingEngine.ONLINE_GEMINI,
+                        activeSession = next,
+                        studioSessions = cur.studioSessions.map { if (it.id == next.id) next else it },
+                        statusMessage = onlineRes.statusNote
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isOnlineProcessing = false,
+                        statusMessage = "Gemini Online: ${err.message}"
+                    )
+                }
+            }
+        }
+    }
+
     /**
      * Non-blocking shutter: takes raw frame (~0.35s), IMMEDIATELY unlocks shutter for next photo,
      * and pushes enhancement + auto-save into background neural queue.
@@ -350,7 +585,9 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                         lens = state.activeLens,
                         isPro = isPro,
                         manualBurstCount = state.burstCount,
-                        captureMode = state.captureMode
+                        captureMode = state.captureMode,
+                        engine = state.processingEngine,
+                        geminiMode = state.geminiOnlineMode
                     )
                 )
             }.onFailure { err ->
@@ -375,26 +612,90 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
     fun importFromGalleryUri(uri: Uri) {
         val state = _uiState.value
         val isPro = state.experienceMode == CameraExperienceMode.PRO
+        val activeEngine = if (state.processingEngine == ProcessingEngine.ONLINE_GEMINI && geminiService.hasApiKey()) {
+            ProcessingEngine.ONLINE_GEMINI
+        } else {
+            ProcessingEngine.OFFLINE_LOCAL
+        }
         viewModelScope.launch {
-            _uiState.update { it.copy(statusMessage = "Processando foto da galeria com IA local…") }
+            _uiState.update {
+                it.copy(
+                    isOnlineProcessing = activeEngine == ProcessingEngine.ONLINE_GEMINI,
+                    statusMessage = if (activeEngine == ProcessingEngine.ONLINE_GEMINI) {
+                        "Banca Fotográfica + Gemini processando foto…"
+                    } else {
+                        "Processando foto da galeria com MODNet + GPU local…"
+                    }
+                )
+            }
             val startMs = System.currentTimeMillis()
             runCatching {
                 val (fullBmp, exifBytes) = withContext(Dispatchers.IO) {
                     cameraController.decodeGalleryUriFullRes(uri)
                 }
                 val stock = if (isPro) state.selectedStock else FilmStock.AUTO_EDITORIAL
-                val analysis = conceptEngine.analyze(fullBmp, stock)
-                val renderedFullRes = withContext(Dispatchers.Default) {
-                    EditorialShaderEngine.renderEditorial(
-                        source = fullBmp,
-                        subjectMask = analysis.subjectMask,
-                        depthMap = analysis.depthMap,
-                        neuralGainMap = analysis.neuralGainMap,
-                        lightingHint = analysis.lightingHint,
-                        recipe = analysis.concept.recipe,
-                        intensity = 1.0f,
-                        hasConfidentMask = analysis.hasConfidentMask
-                    )
+                val analysis = conceptEngine.analyze(fullBmp, stock, activeEngine)
+                var finalConcept = analysis.concept
+                var note: String? = null
+                val renderedFullRes = if (activeEngine == ProcessingEngine.ONLINE_GEMINI) {
+                    val onlineRes = runCatching {
+                        geminiService.enhanceWithGemini(
+                            sourceBitmap = fullBmp,
+                            baseConcept = analysis.concept,
+                            stats = analysis.stats,
+                            labels = analysis.labels,
+                            faceCount = analysis.faceCount,
+                            mode = state.geminiOnlineMode,
+                            hasNeuralAlpha = "MODNet-Guided" in analysis.aiModelsUsed
+                        )
+                    }.getOrNull()
+                    if (onlineRes != null) {
+                        finalConcept = onlineRes.calibratedConcept
+                        note = onlineRes.statusNote
+                        if (onlineRes.generatedBitmap != null) {
+                            dev.deusbr.luminaa55.shader.ShaderRenderResult(onlineRes.generatedBitmap, gpuAccelerated = true)
+                        } else {
+                            withContext(Dispatchers.Default) {
+                                EditorialShaderEngine.renderEditorial(
+                                    source = fullBmp,
+                                    subjectMask = analysis.subjectMask,
+                                    depthMap = analysis.depthMap,
+                                    neuralGainMap = analysis.neuralGainMap,
+                                    lightingHint = analysis.lightingHint,
+                                    recipe = finalConcept.recipe,
+                                    intensity = 1.0f,
+                                    hasConfidentMask = analysis.hasConfidentMask
+                                )
+                            }
+                        }
+                    } else {
+                        note = "Falha no Gemini Online — exibindo Motor Offline."
+                        withContext(Dispatchers.Default) {
+                            EditorialShaderEngine.renderEditorial(
+                                source = fullBmp,
+                                subjectMask = analysis.subjectMask,
+                                depthMap = analysis.depthMap,
+                                neuralGainMap = analysis.neuralGainMap,
+                                lightingHint = analysis.lightingHint,
+                                recipe = analysis.concept.recipe,
+                                intensity = 1.0f,
+                                hasConfidentMask = analysis.hasConfidentMask
+                            )
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Default) {
+                        EditorialShaderEngine.renderEditorial(
+                            source = fullBmp,
+                            subjectMask = analysis.subjectMask,
+                            depthMap = analysis.depthMap,
+                            neuralGainMap = analysis.neuralGainMap,
+                            lightingHint = analysis.lightingHint,
+                            recipe = analysis.concept.recipe,
+                            intensity = 1.0f,
+                            hasConfidentMask = analysis.hasConfidentMask
+                        )
+                    }
                 }
                 val uiOrigPreview = withContext(Dispatchers.Default) {
                     cameraController.createUiPreviewBitmap(fullBmp, 1800)
@@ -413,7 +714,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     processedBitmap = renderedFullRes.bitmap,
                     previewProcessedBitmap = uiProcPreview,
                     exifBytes = exifBytes,
-                    concept = analysis.concept,
+                    concept = finalConcept,
                     aiModelsUsed = analysis.aiModelsUsed,
                     burstFramesMerged = 1,
                     gpuAccelerated = renderedFullRes.gpuAccelerated,
@@ -424,20 +725,23 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     cachedStats = analysis.stats,
                     cachedLabels = analysis.labels,
                     cachedFaceCount = analysis.faceCount,
-                    hasConfidentMask = analysis.hasConfidentMask
+                    hasConfidentMask = analysis.hasConfidentMask,
+                    engineUsed = activeEngine,
+                    onlineNotes = note
                 )
             }.onSuccess { session ->
                 _uiState.update { cur ->
                     val updatedList = (listOf(session) + cur.studioSessions).take(10)
                     cur.copy(
+                        isOnlineProcessing = false,
                         studioSessions = updatedList,
                         activeSession = session,
                         editIntensity = 1.0f,
-                        statusMessage = null
+                        statusMessage = session.onlineNotes
                     )
                 }
             }.onFailure { err ->
-                _uiState.update { it.copy(statusMessage = "Erro ao abrir foto: ${err.message}") }
+                _uiState.update { it.copy(isOnlineProcessing = false, statusMessage = "Erro ao abrir foto: ${err.message}") }
             }
         }
     }
@@ -460,7 +764,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
             val stats = session.cachedStats
             val mask = session.subjectMaskBitmap
             val updatedConcept = if (stats != null) {
-                PhotometricAnalyzer.buildConceptProfile(
+                val baseProfile = PhotometricAnalyzer.buildConceptProfile(
                     stats = stats,
                     labels = session.cachedLabels,
                     faceCount = session.cachedFaceCount,
@@ -468,8 +772,17 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     userSelectedStock = stock,
                     hasConfidentMask = session.hasConfidentMask
                 )
+                val crew = dev.deusbr.luminaa55.context.PhotographyCrewDirector.compileCrewSheet(
+                    concept = baseProfile,
+                    stats = stats,
+                    labels = session.cachedLabels,
+                    faceCount = session.cachedFaceCount,
+                    engine = ProcessingEngine.OFFLINE_LOCAL,
+                    hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                )
+                baseProfile.copy(crewSheet = crew)
             } else {
-                conceptEngine.analyze(session.previewOriginalBitmap, stock).concept
+                conceptEngine.analyze(session.previewOriginalBitmap, stock, ProcessingEngine.OFFLINE_LOCAL).concept
             }
 
             val baseRecipe = updatedConcept.recipe

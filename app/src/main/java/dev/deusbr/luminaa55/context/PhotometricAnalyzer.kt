@@ -265,9 +265,9 @@ object PhotometricAnalyzer {
             bgBokeh = if (hasPerson) 0.94f else 0.68f
             bgDimming = max(bgDimming, if (hasPerson) 0.34f else 0.16f)
             if (hasPerson && !hasSky && !hasPlant) {
-                // Indoor portrait: smooth charcoal radial studio cyclorama separation keeping natural hair edges
-                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.52f else 0.38f
-                adjustments.add("Ciclorama de estúdio + bokeh f/1.4")
+                // Indoor portrait: subtle natural studio ambient falloff preserving organic hair separation
+                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.44f else 0.36f
+                adjustments.add("Fundo estúdio sutil + bokeh f/1.4")
             } else {
                 adjustments.add("Bokeh ótico f/1.4 + separação de fundo")
             }
