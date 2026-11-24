@@ -162,12 +162,14 @@ fun CameraScreen(
             ) {
                 Row(
                     modifier = Modifier
+                        .weight(1f, fill = false)
+                        .padding(end = 8.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(LuminaColors.PanelTranslucent)
                         .border(1.dp, LuminaColors.HairlineBorder, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -181,7 +183,8 @@ fun CameraScreen(
                             color = LuminaColors.InkPrimary,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1
                         )
                         Text(
                             text = "${state.activeLens.sensorSpec} · FULL-RES",
@@ -196,11 +199,11 @@ fun CameraScreen(
 
                 // Right quick indicator / Pro tools only when in Pro
                 if (isPro) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         IconButton(
                             onClick = { viewModel.toggleSessionLock() },
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(38.dp)
                                 .clip(CircleShape)
                                 .background(LuminaColors.PanelTranslucent)
                                 .border(
@@ -213,13 +216,13 @@ fun CameraScreen(
                                 if (state.sessionLookLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                                 contentDescription = "Travar Look da Sessão",
                                 tint = if (state.sessionLookLocked) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                         IconButton(
                             onClick = { viewModel.toggleGrid() },
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(38.dp)
                                 .clip(CircleShape)
                                 .background(LuminaColors.PanelTranslucent)
                                 .border(1.dp, LuminaColors.HairlineBorder, CircleShape)
@@ -228,13 +231,13 @@ fun CameraScreen(
                                 Icons.Default.GridOn,
                                 contentDescription = "Grade 3x3",
                                 tint = if (state.showGrid) LuminaColors.OpticalAmber else LuminaColors.InkSecondary,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                         IconButton(
                             onClick = { viewModel.toggleDiagnostics(true) },
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(38.dp)
                                 .clip(CircleShape)
                                 .background(LuminaColors.PanelTranslucent)
                                 .border(1.dp, LuminaColors.HairlineBorder, CircleShape)
@@ -243,7 +246,7 @@ fun CameraScreen(
                                 Icons.Default.Info,
                                 contentDescription = "Diagnóstico Camera2",
                                 tint = LuminaColors.InkPrimary,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                     }
