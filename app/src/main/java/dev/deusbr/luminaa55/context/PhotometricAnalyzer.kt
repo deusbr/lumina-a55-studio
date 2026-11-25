@@ -11,10 +11,17 @@ import kotlin.math.min
 
 /**
  * Pure-Kotlin photometric and semantic concept engine (zero external dependencies, JVM unit-testable).
+ * Calibrated for Lumina A55 v5.0 (OKLab luminance dehaze, fluorescent green neutralization, melanin-safe tone curve).
  */
 object PhotometricAnalyzer {
 
-    fun analyzeArgbPixels(pixels: IntArray, width: Int, height: Int, faceCenterX: Float? = null, faceCenterY: Float? = null): PhotometricStats {
+    fun analyzeArgbPixels(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        faceCenterX: Float? = null,
+        faceCenterY: Float? = null
+    ): PhotometricStats {
         if (pixels.isEmpty() || width <= 0 || height <= 0) {
             return PhotometricStats(0.5f, 0f, 0f, 0.5f, 0f, 0.3f, 0.5f, 0.5f, 0.5f, 0.5f, LightDirection.BALANCED)
         }
@@ -24,6 +31,8 @@ object PhotometricAnalyzer {
         var shadowCount = 0
         var clipCount = 0
         var warmthSum = 0.0
+        var greenCastSum = 0.0
+        var greenSampled = 0
         var satSum = 0.0
 
         var leftSum = 0.0; var leftN = 0
@@ -50,6 +59,10 @@ object PhotometricAnalyzer {
                 if (luma > 0.94f) clipCount++
 
                 warmthSum += (r - b)
+                if (luma in 0.16f..0.78f) {
+                    greenCastSum += (g - (r + b) * 0.5f)
+                    greenSampled++
+                }
                 val maxC = max(r, max(g, b))
                 val minC = min(r, min(g, b))
                 satSum += if (maxC > 0.001f) (maxC - minC) / maxC else 0f
@@ -73,13 +86,13 @@ object PhotometricAnalyzer {
         val shadowRatio = shadowCount.toFloat() / n
         val clipRatio = clipCount.toFloat() / n
         val warmthBias = (warmthSum / n).toFloat()
+        val greenCastBias = if (greenSampled > 0) (greenCastSum / greenSampled).toFloat() else 0f
         val satMean = (satSum / n).toFloat()
         val leftLuma = if (leftN > 0) (leftSum / leftN).toFloat() else meanLuma
         val rightLuma = if (rightN > 0) (rightSum / rightN).toFloat() else meanLuma
         val topLuma = if (topN > 0) (topSum / topN).toFloat() else meanLuma
         val centerLuma = if (centerN > 0) (centerSum / centerN).toFloat() else meanLuma
 
-        // 5th to 95th percentile dynamic spread
         var p05 = 0
         var p95 = 255
         var acc = 0
@@ -115,7 +128,8 @@ object PhotometricAnalyzer {
             topLuma = topLuma,
             centerLuma = centerLuma,
             lightDirection = lightDirection,
-            shadowFloorLuma = (p05 / 255f).coerceIn(0f, 1f)
+            shadowFloorLuma = (p05 / 255f).coerceIn(0f, 1f),
+            greenCastBias = greenCastBias
         )
     }
 
@@ -128,8 +142,12 @@ object PhotometricAnalyzer {
         hasConfidentMask: Boolean = true
     ): SceneConcept {
         val normLabels = labels.map { it.lowercase() }
-        val hasPerson = faceCount > 0 || normLabels.any { it.contains("person") || it.contains("selfie") || it.contains("smile") || it.contains("portrait") || it.contains("fashion") }
-        val hasSky = normLabels.any { it.contains("sky") || it.contains("cloud") || it.contains("sunset") || it.contains("sunrise") || it.contains("mountain") || it.contains("beach") }
+        val hasPerson = faceCount > 0 || normLabels.any {
+            it.contains("person") || it.contains("selfie") || it.contains("smile") || it.contains("portrait") || it.contains("fashion")
+        }
+        val hasSky = normLabels.any {
+            it.contains("sky") || it.contains("cloud") || it.contains("sunset") || it.contains("sunrise") || it.contains("mountain") || it.contains("beach")
+        }
         val hasFood = normLabels.any { it.contains("food") || it.contains("dish") || it.contains("coffee") || it.contains("drink") || it.contains("cuisine") }
         val hasPlant = normLabels.any { it.contains("plant") || it.contains("flower") || it.contains("tree") || it.contains("forest") || it.contains("garden") }
         val hasUrban = normLabels.any { it.contains("building") || it.contains("city") || it.contains("street") || it.contains("architecture") || it.contains("car") || it.contains("night") }
@@ -140,11 +158,11 @@ object PhotometricAnalyzer {
         val isGoldenWarm = stats.warmthBias > 0.07f && !isNight
 
         val recommendedStock = when {
-            isNight && (hasUrban || !hasPerson) -> FilmStock.CINESTILL_800T
-            hasPerson -> FilmStock.PORTRA_400
-            isGoldenWarm || hasSky || hasPlant -> FilmStock.KODAK_GOLD_200
-            hasFood || hasPet -> FilmStock.HASSELBLAD_NATURAL
-            else -> FilmStock.PORTRA_400
+            isNight -> FilmStock.CINEMA_CHIAROSCURO
+            hasPerson -> FilmStock.RETRATO_EDITORIAL
+            isGoldenWarm || hasSky || hasPlant -> FilmStock.GOLDEN_FILM
+            hasFood || hasPet || hasUrban -> FilmStock.LUZ_NATURAL
+            else -> FilmStock.RETRATO_EDITORIAL
         }
 
         val activeStock = if (userSelectedStock == FilmStock.AUTO_EDITORIAL) recommendedStock else userSelectedStock
@@ -156,109 +174,111 @@ object PhotometricAnalyzer {
         when {
             hasPerson && isBacklit -> {
                 conceptTitle = "Retrato Editorial em Contraluz"
-                conceptSummary = "Sujeito escuro contra fundo luminoso: recuperamos a luz facial com proteção de pele e halation suave nas bordas."
+                conceptSummary = "Resgate limpo em luminância OKLab L, hue-lock de pele e roll-off suave sem halos de recorte."
             }
             hasPerson && isNight -> {
-                conceptTitle = "Retrato Noturno Cinemático"
-                conceptSummary = "Baixa luz detectada: preservamos os pretos profundos com levantamento limpo no rosto e brilho suave de película 800T."
+                conceptTitle = "Retrato Cinema Noturno"
+                conceptSummary = "Contraste chiaroscuro em OKLab L, controle de altas luzes Pro-Mist 1/8 e pretos ancorados."
             }
             hasPerson && (stats.lightDirection == LightDirection.LEFT_KEY || stats.lightDirection == LightDirection.RIGHT_KEY) -> {
-                conceptTitle = "Retrato Luz Lateral (Chiaroscuro)"
-                conceptSummary = "Direção de luz marcada (${stats.lightDirection.labelPt}): acentuamos o volume sem estourar altas luzes na pele."
+                conceptTitle = "Retrato Luz Lateral Editorial"
+                conceptSummary = "Separação natural 85mm f/1.4 com micro-nitidez ocular e neutralização de dominante."
             }
             hasPerson -> {
-                conceptTitle = if (faceCount > 1) "Ensaio Editorial em Grupo" else "Retrato Editorial Natural"
-                conceptSummary = "Pele protegida no vetorscópio, separação tonal suave do fundo e contraste fílmico Portra."
+                conceptTitle = if (faceCount > 1) "Ensaio Editorial em Grupo" else "Retrato Editorial Limpo"
+                conceptSummary = "Curva Capture One em OKLab L, proteção de matiz de pele (15°–38°) e ótica Pro-Mist 1/8."
             }
             hasSky && isGoldenWarm -> {
                 conceptTitle = "Paisagem Golden Hour"
-                conceptSummary = "Recuperação de céu com curva ACES, calor solar equilibrado e sombras limpas sem aspecto artificial."
+                conceptSummary = "Recuperação natural de céu, calor dourado equilibrado e nitidez de borda a borda."
             }
             isNight -> {
-                conceptTitle = "Cena Noturna Urbana"
-                conceptSummary = "Contraste cinematográfico com controle de ruído, halation nas luzes pontuais e sombras densas."
+                conceptTitle = "Cena Cinema Noturna"
+                conceptSummary = "Chiaroscuro controlado, halation suave nas fontes pontuais e sombras limpas."
             }
             hasFood -> {
                 conceptTitle = "Editorial Gastronomia & Textura"
-                conceptSummary = "Micro-contraste de textura elevado, brilhos suaves e cores naturais apetitosas sem excesso de saturação."
+                conceptSummary = "Micro-contraste tátil, balanço de branco neutro e brilho natural sem saturação artificial."
             }
             hasPet -> {
                 conceptTitle = "Retrato Animal / Pelagem"
-                conceptSummary = "Nitidez seletiva nos olhos/pelagem com desfoque orgânico de fundo."
+                conceptSummary = "Nitidez seletiva nos olhos e pelos com desfoque ótico sutil."
             }
             hasUrban -> {
                 conceptTitle = "Arquitetura & Geometria"
-                conceptSummary = "Micro-contraste estrutural, controle de altas luzes e graduação editorial limpa."
+                conceptSummary = "Micro-contraste estrutural, controle de altas luzes e graduação neutra."
             }
             else -> {
-                conceptTitle = "Ensaio Editorial Adaptativo"
-                conceptSummary = "Curva fílmica balanceada conforme histograma e direção de luz da cena."
+                conceptTitle = "Ensaio Editorial OKLab"
+                conceptSummary = "Curva fílmica Capture One em luminância pura respeitando a luz real da cena."
             }
         }
 
-        // Base recipe per stock (clean black point, studio contrast, zero unsolicited veil/halation)
         var exposureOffset = 0.0f
-        var contrast = 1.10f
-        var shadowLift = 0.0f
+        var contrast = 1.09f
+        var shadowLift = 0.02f
         var highlightRollOff = 0.36f
         var clarity = 0.14f
-        var warmth = 0.015f
+        var warmth = 0.008f
         var tint = 0.0f
-        var saturation = 1.04f
-        val skinProtection = if (hasPerson) 0.88f else 0.35f
+        var saturation = 1.03f
+        val skinProtection = if (hasPerson) 0.90f else 0.40f
         var faceRelight = 0.0f
         var bgDimming = 0.0f
         var bgBokeh = 0.0f
         var skyRecovery = 0.0f
         var halation = 0.0f
-        var proMist = 0.0f
-        var grain = 0.03f
-        var vignette = 0.14f
+        var proMist = 0.10f
+        var grain = 0.025f
+        var vignette = 0.16f
         var mono = false
 
         when (activeStock) {
-            FilmStock.PORTRA_400 -> {
-                contrast = 1.14f; shadowLift = 0.0f; highlightRollOff = 0.38f; clarity = 0.18f
-                warmth = 0.008f; tint = 0.002f; saturation = 1.05f; proMist = 0.0f; grain = 0.025f; vignette = 0.16f
+            FilmStock.RETRATO_EDITORIAL -> {
+                contrast = 1.10f; shadowLift = 0.02f; highlightRollOff = 0.40f; clarity = 0.16f
+                warmth = 0.006f; tint = -0.008f; saturation = 1.04f; proMist = 0.10f; grain = 0.022f; vignette = 0.17f
             }
-            FilmStock.CINESTILL_800T -> {
-                contrast = 1.14f; shadowLift = 0.0f; highlightRollOff = 0.42f; clarity = 0.14f
-                warmth = -0.04f; tint = -0.01f; saturation = 1.06f; halation = 0.28f; proMist = 0.04f; grain = 0.06f; vignette = 0.20f
+            FilmStock.LUZ_NATURAL -> {
+                contrast = 1.07f; shadowLift = 0.08f; highlightRollOff = 0.36f; clarity = 0.15f
+                warmth = 0.004f; tint = -0.005f; saturation = 1.02f; proMist = 0.08f; grain = 0.015f; vignette = 0.14f
             }
-            FilmStock.HASSELBLAD_NATURAL -> {
-                contrast = 1.12f; shadowLift = 0.0f; highlightRollOff = 0.35f; clarity = 0.18f
-                warmth = 0.0f; saturation = 1.02f; proMist = 0.0f; grain = 0.01f; vignette = 0.10f
+            FilmStock.GOLDEN_FILM -> {
+                contrast = 1.11f; shadowLift = 0.04f; highlightRollOff = 0.42f; clarity = 0.14f
+                warmth = 0.032f; tint = 0.004f; saturation = 1.06f; halation = 0.08f; proMist = 0.12f; grain = 0.032f; vignette = 0.18f
             }
-            FilmStock.KODAK_GOLD_200 -> {
-                contrast = 1.11f; shadowLift = 0.0f; highlightRollOff = 0.36f; clarity = 0.13f
-                warmth = 0.05f; tint = 0.008f; saturation = 1.06f; halation = 0.0f; proMist = 0.0f; grain = 0.04f; vignette = 0.14f
+            FilmStock.CINEMA_CHIAROSCURO -> {
+                contrast = 1.14f; shadowLift = 0.0f; highlightRollOff = 0.46f; clarity = 0.16f
+                warmth = -0.015f; tint = -0.010f; saturation = 1.03f; halation = 0.18f; proMist = 0.12f; grain = 0.040f; vignette = 0.22f
             }
-            FilmStock.LEICA_MONOCHROME -> {
-                contrast = 1.22f; shadowLift = 0.0f; highlightRollOff = 0.40f
-                clarity = 0.20f; saturation = 0f; halation = 0.0f; proMist = 0.0f; grain = 0.07f; vignette = 0.24f; mono = true
+            FilmStock.PRATA_MONOCHROME -> {
+                contrast = 1.18f; shadowLift = 0.0f; highlightRollOff = 0.42f
+                clarity = 0.20f; saturation = 0f; halation = 0.0f; proMist = 0.08f; grain = 0.055f; vignette = 0.22f; mono = true
             }
             FilmStock.AUTO_EDITORIAL -> Unit
         }
 
-        // Context-driven adaptive adjustments (3D Studio Relighting + Backdrop Cyclorama + Sky/Macro specialization)
+        // Neutralize greenish fluorescent indoor cast cleanly without shifting skin orange
+        if (stats.greenCastBias > 0.010f) {
+            val magFix = -(stats.greenCastBias * 0.90f).coerceIn(0.012f, 0.045f)
+            tint = (tint + magFix).coerceIn(-0.06f, 0.04f)
+            adjustments.add("Neutralização de verde fluorescente (+magenta)")
+        }
+
         val keySideSign = if (stats.rightLuma > stats.leftLuma + 0.03f) 1.0f else -1.0f
-        var relight3d = 0.0f
-        var studioBackdrop = 0.0f
 
         if (isBacklit && hasPerson) {
-            faceRelight += 0.28f
-            relight3d = 0.78f
-            if (hasConfidentMask) bgDimming += 0.16f
+            exposureOffset += 0.12f
+            faceRelight += 0.16f
+            bgDimming += 0.10f
             highlightRollOff = max(highlightRollOff, 0.50f)
-            adjustments.add("Relight 3D facial em contraluz + Negative Fill")
+            adjustments.add("Resgate suave de contraluz em OKLab L")
         } else if (hasPerson && stats.centerLuma < 0.44f) {
-            faceRelight += 0.18f
-            relight3d = 0.72f
-            adjustments.add("Softbox 3D 45° + Dodge & Burn ocular")
+            exposureOffset += 0.06f
+            faceRelight += 0.12f
+            adjustments.add("Fill facial sutil + foco ótico nos olhos")
         } else if (hasPerson) {
-            faceRelight += 0.10f
-            relight3d = 0.65f
-            adjustments.add("Escultura 3D softbox + rim light")
+            faceRelight += 0.06f
+            adjustments.add("Hue-Lock de pele (15°–38°) + nitidez ocular")
         }
 
         val canPortraitBokeh = hasConfidentMask && (
@@ -266,75 +286,59 @@ object PhotometricAnalyzer {
                 (hasPet && !hasSky && subjectRatio in 0.18f..0.88f)
             )
         if (canPortraitBokeh) {
-            bgBokeh = if (hasPerson) 0.86f else 0.62f
-            bgDimming = max(bgDimming, if (hasPerson) 0.28f else 0.14f)
-            if (hasPerson && !hasSky && !hasPlant) {
-                // Indoor close/mid portrait: subtle natural studio ambient falloff preserving organic hair separation
-                studioBackdrop = if (stats.meanLuma < 0.64f || isBacklit) 0.42f else 0.34f
-                adjustments.add("Fundo estúdio sutil + bokeh f/1.4")
-            } else {
-                adjustments.add("Bokeh ótico f/1.4 + separação de fundo")
-            }
+            // Subtle optical lens bokeh (1–3px feathered), zero dark backdrop cutout paint
+            bgBokeh = if (hasPerson) 0.42f else 0.34f
+            bgDimming = max(bgDimming, if (hasPerson) 0.09f else 0.05f)
+            adjustments.add("Bokeh ótico 1–3px natural + vinheta f/1.4")
         } else if (!hasSky && (hasUrban || hasFood || !hasPerson || faceCount == 0 || subjectRatio < 0.22f)) {
-            // Environmental / wide / multi-depth scenes stay tack-sharp edge-to-edge (Leica 35mm f/2 look)
             bgBokeh = 0.0f
-            studioBackdrop = 0.0f
-            clarity = max(clarity, 0.22f)
-            adjustments.add("Plano amplo nítido (35mm f/2.0 · zero blur no fundo)")
-        }
-
-        if (hasPerson) {
-            adjustments.add("Proteção de tom de pele e micro-nitidez ocular")
+            clarity = max(clarity, 0.20f)
+            adjustments.add("Plano amplo nítido (35mm f/2.0 · zero blur artificial)")
         }
 
         if (hasSky || stats.highlightClipRatio > 0.06f) {
-            skyRecovery = if (hasSky && !hasPerson) 0.55f else 0.34f
-            highlightRollOff = max(highlightRollOff, 0.50f)
+            skyRecovery = if (hasSky && !hasPerson) 0.50f else 0.30f
+            highlightRollOff = max(highlightRollOff, 0.48f)
             if (hasSky && !hasPerson) {
                 bgBokeh = 0.0f
-                studioBackdrop = 0.0f
-                relight3d = 0.15f
-                clarity = max(clarity, 0.22f)
+                clarity = max(clarity, 0.20f)
             }
-            adjustments.add("Recuperação de altas luzes / céu (roll-off suave)")
+            adjustments.add("Roll-off suave nas altas luzes / céu")
         }
 
         if (hasFood || hasUrban || hasPet) {
-            clarity = max(clarity, 0.24f)
-            if (hasFood) saturation = max(saturation, 1.10f)
-            if (!hasPerson) relight3d = max(relight3d, 0.42f)
-            adjustments.add("Micro-contraste 3D de textura seletivo")
+            clarity = max(clarity, 0.22f)
+            if (hasFood) saturation = max(saturation, 1.07f)
+            adjustments.add("Micro-contraste de textura seletivo")
         }
 
         if (isNight) {
-            exposureOffset += 0.06f
-            shadowLift = 0.18f
-            halation = max(halation, 0.24f)
-            if (!hasPerson) studioBackdrop = 0.0f
+            exposureOffset += 0.05f
+            shadowLift = max(shadowLift, 0.10f)
+            halation = max(halation, 0.18f)
             adjustments.add("Halation noturna e controle de sombras")
         }
 
-        if (stats.dynamicRangeSpread < 0.48f) {
-            contrast += 0.08f
-            adjustments.add("Dehaze e ancoragem de ponto preto")
+        // Pure OKLab Luminance (L) dehaze + black-point anchor — never crushes R/G/B skin ratios
+        val adaptiveDehaze = if (!isNight && stats.shadowFloorLuma > 0.03f) {
+            ((stats.shadowFloorLuma - 0.02f) * 0.65f).coerceIn(0.015f, 0.065f)
+        } else if (!isNight) {
+            0.018f
+        } else {
+            0.0f
+        }
+        if (adaptiveDehaze >= 0.02f) {
+            adjustments.add("Dehaze em luminância OKLab L (zero shift laranja)")
         }
 
         if (adjustments.isEmpty()) {
-            adjustments.add("Curva fílmica natural + controle de altas luzes")
+            adjustments.add("Curva OKLab Capture One + Pro-Mist 1/8")
         }
 
         val autoBurst = when {
             isNight -> 5
             isBacklit || hasPerson || stats.shadowRatio > 0.25f -> 3
             else -> 1
-        }
-
-        val adaptiveDehaze = if (!isNight && stats.shadowFloorLuma > 0.03f) {
-            ((stats.shadowFloorLuma - 0.02f) * 0.72f).coerceIn(0.015f, 0.075f)
-        } else if (!isNight) {
-            0.018f
-        } else {
-            0.0f
         }
 
         return SceneConcept(
@@ -350,7 +354,7 @@ object PhotometricAnalyzer {
             appliedAdjustments = adjustments,
             recipe = EditRecipe(
                 filmStock = activeStock,
-                exposureOffset = exposureOffset,
+                exposureOffset = exposureOffset.coerceIn(-0.20f, 0.28f),
                 contrast = contrast,
                 shadowLift = shadowLift,
                 highlightRollOff = highlightRollOff,
@@ -369,8 +373,8 @@ object PhotometricAnalyzer {
                 vignetteStrength = vignette,
                 monochrome = mono,
                 dehazeAmount = adaptiveDehaze,
-                relight3dStrength = relight3d,
-                studioBackdropStrength = studioBackdrop,
+                relight3dStrength = 0.0f,
+                studioBackdropStrength = 0.0f,
                 keyDirectionSign = keySideSign
             )
         )
