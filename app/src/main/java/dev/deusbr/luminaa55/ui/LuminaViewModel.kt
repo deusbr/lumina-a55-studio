@@ -19,6 +19,7 @@ import dev.deusbr.luminaa55.model.CapturedPhotoSession
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.GeminiOnlineMode
 import dev.deusbr.luminaa55.model.LensOption
+import dev.deusbr.luminaa55.model.OnlineDirectionStyle
 import dev.deusbr.luminaa55.model.ProDeckTab
 import dev.deusbr.luminaa55.model.ProcessingEngine
 import dev.deusbr.luminaa55.online.GeminiStudioService
@@ -52,7 +53,7 @@ data class LuminaUiState(
     val autoDecision: AutoLiveDecision = AutoLiveDecision(
         headline = "Modo Automático · IA Local",
         subtitle = "Analisando cena e profundidade…",
-        recommendedStock = FilmStock.PORTRA_400,
+        recommendedStock = FilmStock.RETRATO_EDITORIAL,
         recommendedBurst = 3
     ),
     val isShutterBusy: Boolean = false,
@@ -65,6 +66,7 @@ data class LuminaUiState(
     val editIntensity: Float = 1.0f,
     val processingEngine: ProcessingEngine = ProcessingEngine.OFFLINE_LOCAL,
     val geminiOnlineMode: GeminiOnlineMode = GeminiOnlineMode.STUDIO_IMAGE_FLASH,
+    val onlineDirectionStyle: OnlineDirectionStyle = OnlineDirectionStyle.STUDIO_EDITORIAL,
     val hasGeminiKey: Boolean = false,
     val showGeminiSettingsDialog: Boolean = false,
     val isOnlineProcessing: Boolean = false
@@ -78,7 +80,8 @@ private data class QueuedShot(
     val manualBurstCount: Int,
     val captureMode: CaptureMode,
     val engine: ProcessingEngine,
-    val geminiMode: GeminiOnlineMode
+    val geminiMode: GeminiOnlineMode,
+    val directionStyle: OnlineDirectionStyle
 )
 
 class LuminaViewModel(app: Application) : AndroidViewModel(app) {
@@ -156,7 +159,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     labels = analysis.labels,
                     faceCount = analysis.faceCount,
                     mode = job.geminiMode,
-                    hasNeuralAlpha = "MODNet-Guided" in analysis.aiModelsUsed
+                    directionStyle = job.directionStyle,
+                    hasNeuralAlpha = analysis.hasConfidentMask
                 )
             }.getOrNull()
             if (onlineRes != null) {
@@ -395,6 +399,10 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(geminiOnlineMode = mode) }
     }
 
+    fun selectOnlineDirectionStyle(style: OnlineDirectionStyle) {
+        _uiState.update { it.copy(onlineDirectionStyle = style) }
+    }
+
     fun openGeminiSettingsDialog(open: Boolean) {
         _uiState.update { it.copy(showGeminiSettingsDialog = open) }
     }
@@ -445,7 +453,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                         labels = session.cachedLabels,
                         faceCount = session.cachedFaceCount,
                         engine = ProcessingEngine.OFFLINE_LOCAL,
-                        hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                        hasNeuralAlpha = session.hasConfidentMask
                     )
                     offlineBase.copy(crewSheet = crew)
                 } else session.concept
@@ -476,13 +484,13 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                         processingEngine = ProcessingEngine.OFFLINE_LOCAL,
                         activeSession = next,
                         studioSessions = cur.studioSessions.map { if (it.id == next.id) next else it },
-                        statusMessage = "Motor Offline (MODNet + GPU) aplicado."
+                        statusMessage = "Motor Offline (OKLab GPU) aplicado."
                     )
                 }
                 return@launch
             }
 
-            _uiState.update { it.copy(isOnlineProcessing = true, statusMessage = "Banca Fotográfica + Gemini analisando na nuvem…") }
+            _uiState.update { it.copy(isOnlineProcessing = true, statusMessage = "Banca 5 Blocos + Gemini analisando…") }
             runCatching {
                 geminiService.enhanceWithGemini(
                     sourceBitmap = session.originalBitmap,
@@ -491,7 +499,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     labels = session.cachedLabels,
                     faceCount = session.cachedFaceCount,
                     mode = state.geminiOnlineMode,
-                    hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                    directionStyle = state.onlineDirectionStyle,
+                    hasNeuralAlpha = session.hasConfidentMask
                 )
             }.onSuccess { onlineRes ->
                 val fullResBmp: Bitmap
@@ -587,7 +596,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                         manualBurstCount = state.burstCount,
                         captureMode = state.captureMode,
                         engine = state.processingEngine,
-                        geminiMode = state.geminiOnlineMode
+                        geminiMode = state.geminiOnlineMode,
+                        directionStyle = state.onlineDirectionStyle
                     )
                 )
             }.onFailure { err ->
@@ -646,7 +656,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                             labels = analysis.labels,
                             faceCount = analysis.faceCount,
                             mode = state.geminiOnlineMode,
-                            hasNeuralAlpha = "MODNet-Guided" in analysis.aiModelsUsed
+                            directionStyle = state.onlineDirectionStyle,
+                            hasNeuralAlpha = analysis.hasConfidentMask
                         )
                     }
                     val onlineRes = onlineOutcome.getOrNull()
@@ -752,9 +763,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
         intensity: Float = _uiState.value.editIntensity,
         customProMist: Float? = null,
         customBokeh: Float? = null,
-        customGrain: Float? = null,
-        customRelight3d: Float? = null,
-        customBackdrop: Float? = null
+        customGrain: Float? = null
     ) {
         val session = _uiState.value.activeSession ?: return
         _uiState.update { it.copy(selectedStock = stock, editIntensity = intensity) }
@@ -779,7 +788,7 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                     labels = session.cachedLabels,
                     faceCount = session.cachedFaceCount,
                     engine = ProcessingEngine.OFFLINE_LOCAL,
-                    hasNeuralAlpha = "MODNet-Guided" in session.aiModelsUsed
+                    hasNeuralAlpha = session.hasConfidentMask
                 )
                 baseProfile.copy(crewSheet = crew)
             } else {
@@ -791,8 +800,8 @@ class LuminaViewModel(app: Application) : AndroidViewModel(app) {
                 proMistStrength = customProMist ?: baseRecipe.proMistStrength,
                 backgroundBokeh = customBokeh ?: baseRecipe.backgroundBokeh,
                 grainAmount = customGrain ?: baseRecipe.grainAmount,
-                relight3dStrength = customRelight3d ?: baseRecipe.relight3dStrength,
-                studioBackdropStrength = customBackdrop ?: baseRecipe.studioBackdropStrength
+                relight3dStrength = 0.0f,
+                studioBackdropStrength = 0.0f
             )
             val allowMask = session.hasConfidentMask || (customBokeh != null && customBokeh > 0.01f && (mask?.width ?: 0) > 16)
 

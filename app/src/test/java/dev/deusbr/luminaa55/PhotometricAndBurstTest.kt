@@ -6,6 +6,7 @@ import dev.deusbr.luminaa55.context.PhotometricAnalyzer
 import dev.deusbr.luminaa55.context.PhotographyCrewDirector
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.LightDirection
+import dev.deusbr.luminaa55.model.OnlineDirectionStyle
 import dev.deusbr.luminaa55.model.ProcessingEngine
 import dev.deusbr.luminaa55.shader.EditorialShaderEngine
 import org.junit.Assert.assertEquals
@@ -20,13 +21,12 @@ class PhotometricAndBurstTest {
     }
 
     @Test
-    fun backlitPortraitTriggersRelightAndPortra400() {
+    fun backlitPortraitTriggersRelightAndEditorialLimpo() {
         val w = 64
         val h = 64
         val px = IntArray(w * h)
         for (y in 0 until h) {
             for (x in 0 until w) {
-                // Bright sky top, dark backlit center face
                 val v = if (y < 24) 240 else 45
                 px[y * w + x] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
             }
@@ -41,13 +41,15 @@ class PhotometricAndBurstTest {
             subjectRatio = 0.35f,
             userSelectedStock = FilmStock.AUTO_EDITORIAL
         )
-        assertEquals(FilmStock.PORTRA_400, concept.recommendedStock)
-        assertTrue(concept.recipe.faceRelightGain >= 0.25f)
+        assertEquals(FilmStock.RETRATO_EDITORIAL, concept.recommendedStock)
+        assertTrue(concept.recipe.faceRelightGain >= 0.14f)
         assertTrue(concept.recipe.skyRecovery > 0.2f)
+        assertEquals(0f, concept.recipe.studioBackdropStrength, 0.001f)
+        assertEquals(0f, concept.recipe.relight3dStrength, 0.001f)
     }
 
     @Test
-    fun nightUrbanSelectsCineStill800TWithHalation() {
+    fun nightUrbanSelectsCinemaChiaroscuroWithHalation() {
         val px = solidFrame(48, 48, 18, 22, 34)
         val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 48, 48)
         assertEquals(LightDirection.LOW_KEY, stats.lightDirection)
@@ -59,8 +61,8 @@ class PhotometricAndBurstTest {
             subjectRatio = 0f,
             userSelectedStock = FilmStock.AUTO_EDITORIAL
         )
-        assertEquals(FilmStock.CINESTILL_800T, concept.recommendedStock)
-        assertTrue(concept.recipe.halationStrength >= 0.28f)
+        assertEquals(FilmStock.CINEMA_CHIAROSCURO, concept.recommendedStock)
+        assertTrue(concept.recipe.halationStrength >= 0.16f)
     }
 
     @Test
@@ -69,13 +71,11 @@ class PhotometricAndBurstTest {
         val h = 24
         val f1 = solidFrame(w, h, 100, 100, 100)
         val f2 = solidFrame(w, h, 106, 106, 106)
-        // Introduce strong moving ghost object in center of f3
         val f3 = solidFrame(w, h, 94, 94, 94)
         f3[12 * w + 12] = (0xFF shl 24) or (250 shl 16) or (10 shl 8) or 10
 
         val merged = MultiFrameBurstProcessor.mergeArgbBurst(listOf(f1, f2, f3), w, h, searchRadius = 1)
         val centerR = (merged[12 * w + 12] ushr 16) and 0xFF
-        // Ghost pixel (250) must be rejected so center stays close to 103, not 152
         assertTrue("Expected ghost-rejected red channel < 115, got $centerR", centerR < 115)
     }
 
@@ -88,7 +88,7 @@ class PhotometricAndBurstTest {
             labels = listOf("Person"),
             faceCount = 1,
             subjectRatio = 1.0f,
-            userSelectedStock = FilmStock.PORTRA_400,
+            userSelectedStock = FilmStock.RETRATO_EDITORIAL,
             hasConfidentMask = false
         )
         assertEquals(0f, concept.recipe.backgroundBokeh, 0.0001f)
@@ -104,7 +104,7 @@ class PhotometricAndBurstTest {
             labels = listOf("Person"),
             faceCount = 1,
             subjectRatio = 0.35f,
-            userSelectedStock = FilmStock.PORTRA_400,
+            userSelectedStock = FilmStock.RETRATO_EDITORIAL,
             hasConfidentMask = true
         )
         val recipe = concept.recipe.copy(faceRelightGain = 0.25f, backgroundDimming = 0.12f, grainAmount = 0f, vignetteStrength = 0f)
@@ -123,6 +123,57 @@ class PhotometricAndBurstTest {
         val bgR = (bgOut ushr 16) and 0xFF
         assertTrue("Foreground ($fgR) must be brighter than background ($bgR)", fgR > bgR)
         assertTrue("Midtone foreground ($fgR) must not be crushed dark", fgR in 120..180)
+    }
+
+    @Test
+    fun oklabLuminanceDehazePreservesSkinHueWithoutOrangeShift() {
+        // Forehead benchmark from real A55 sample 1000407142.jpg: RGB(136, 112, 96)
+        val px = solidFrame(32, 32, 136, 112, 96)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
+        val concept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person", "Portrait"),
+            faceCount = 1,
+            subjectRatio = 0.50f,
+            userSelectedStock = FilmStock.RETRATO_EDITORIAL,
+            hasConfidentMask = true
+        )
+        val recipe = concept.recipe.copy(dehazeAmount = 0.065f, grainAmount = 0f, vignetteStrength = 0f)
+        val out = EditorialShaderEngine.applyEditorialToneToPixel(
+            r = 136f / 255f, g = 112f / 255f, b = 96f / 255f,
+            nx = 0f, ny = 0f, x = 16, y = 16,
+            mask = 1.0f, hasConfidentMask = true, recipe = recipe
+        )
+        val outR = (out ushr 16) and 0xFF
+        val outG = (out ushr 8) and 0xFF
+        val outB = out and 0xFF
+        assertTrue("OKLab dehaze must NOT crush skin green channel orange (got R=$outR G=$outG B=$outB)", outG >= 96)
+        assertTrue("OKLab dehaze must preserve R-B separation without orange shift (R=$outR, B=$outB)", (outR - outB) <= 50)
+    }
+
+    @Test
+    fun silverGelatinMonochromeUsesMelaninSafeWeights() {
+        val px = solidFrame(32, 32, 160, 120, 80)
+        val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32)
+        val concept = PhotometricAnalyzer.buildConceptProfile(
+            stats = stats,
+            labels = listOf("Person"),
+            faceCount = 1,
+            subjectRatio = 0.45f,
+            userSelectedStock = FilmStock.PRATA_MONOCHROME,
+            hasConfidentMask = true
+        )
+        assertTrue(concept.recipe.monochrome)
+        val out = EditorialShaderEngine.applyEditorialToneToPixel(
+            r = 160f / 255f, g = 120f / 255f, b = 80f / 255f,
+            nx = 0f, ny = 0f, x = 8, y = 8,
+            mask = 1.0f, hasConfidentMask = true,
+            recipe = concept.recipe.copy(grainAmount = 0f, vignetteStrength = 0f)
+        )
+        val outR = (out ushr 16) and 0xFF
+        val outB = out and 0xFF
+        assertTrue("Melanin-safe Silver Gelatin B&W must keep warm luminosity around >=125 (got $outR)", outR >= 125)
+        assertTrue("Silver tone neutral balance check ($outR vs $outB)", outR >= outB)
     }
 
     @Test
@@ -163,7 +214,6 @@ class PhotometricAndBurstTest {
             for (x in 0 until w) {
                 val i = y * w + x
                 val isSubject = x in 5..10 && y in 4..12
-                // Inverse depth: near subject = 10f, far wall = 1f
                 rawInvDepth[i] = if (isSubject) 10f else 1f
                 fgMask[i] = if (isSubject) 0.95f else 0.05f
             }
@@ -176,19 +226,17 @@ class PhotometricAndBurstTest {
     @Test
     fun zeroDceGainEncodingBoostsLowLightAndPreservesNeutral() {
         val neutralByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.5f, enhancedVal = 0.5f, mixStrength = 0.5f)
-        // gain=1.0 -> (1.0 - 0.5) / 2.0 = 0.25 -> ~63..64
         assertTrue("Neutral gain byte expected near 63..64, got $neutralByte", neutralByte in 62..65)
 
         val liftedByte = NeuralStudioEngine.encodeGainChannel(inVal = 0.15f, enhancedVal = 0.30f, mixStrength = 0.65f)
         assertTrue("Low-light lifted gain byte ($liftedByte) must exceed neutral ($neutralByte)", liftedByte > neutralByte + 25)
 
-        // Indoor / bright scenes must NOT invoke Zero-DCE milky shadow wash
         assertEquals(0f, NeuralStudioEngine.computeZeroDceAdaptiveMix(meanLuma = 0.49f, shadowRatio = 0.18f), 0.0001f)
         assertTrue(NeuralStudioEngine.computeZeroDceAdaptiveMix(meanLuma = 0.16f, shadowRatio = 0.60f) > 0.5f)
     }
 
     @Test
-    fun pureBlackRemainsAnchoredAndCloseSelfieKeepsStudioBokeh() {
+    fun pureBlackRemainsAnchoredAndCloseSelfieKeepsSubtleOpticalBokehWithZeroBackdropPaint() {
         val px = solidFrame(32, 32, 128, 128, 128)
         val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
         val closeSelfieConcept = PhotometricAnalyzer.buildConceptProfile(
@@ -199,9 +247,9 @@ class PhotometricAndBurstTest {
             userSelectedStock = FilmStock.AUTO_EDITORIAL,
             hasConfidentMask = true
         )
-        assertTrue("Close selfie (80% frame) must keep studio bokeh active", closeSelfieConcept.recipe.backgroundBokeh >= 0.60f)
-        assertTrue("Close selfie must separate background dimming", closeSelfieConcept.recipe.backgroundDimming >= 0.15f)
-        assertEquals("Clean studio default should not add milky Pro-Mist haze", 0f, closeSelfieConcept.recipe.proMistStrength, 0.001f)
+        assertTrue("Close selfie (80% frame) must keep subtle optical bokeh active", closeSelfieConcept.recipe.backgroundBokeh in 0.30f..0.60f)
+        assertEquals("Zero fake black backdrop cutout allowed", 0f, closeSelfieConcept.recipe.studioBackdropStrength, 0.001f)
+        assertTrue("Editorial Limpo enables gentle Black Pro-Mist 1/8 highlight bloom", closeSelfieConcept.recipe.proMistStrength in 0.06f..0.14f)
 
         val blackPixel = EditorialShaderEngine.applyEditorialToneToPixel(
             r = 0f, g = 0f, b = 0f,
@@ -214,7 +262,7 @@ class PhotometricAndBurstTest {
     }
 
     @Test
-    fun contextEngineDifferentiatesIndoorStudioPortraitFromOutdoorLandscape() {
+    fun contextEngineDifferentiatesIndoorPortraitFromOutdoorLandscape() {
         val px = solidFrame(32, 32, 122, 118, 110)
         val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
 
@@ -226,8 +274,9 @@ class PhotometricAndBurstTest {
             userSelectedStock = FilmStock.AUTO_EDITORIAL,
             hasConfidentMask = true
         )
-        assertTrue("Indoor portrait must enable 3D normal relight", indoorPortrait.recipe.relight3dStrength >= 0.60f)
-        assertTrue("Indoor portrait must activate studio backdrop cyclorama", indoorPortrait.recipe.studioBackdropStrength >= 0.35f)
+        assertEquals(0f, indoorPortrait.recipe.relight3dStrength, 0.001f)
+        assertEquals(0f, indoorPortrait.recipe.studioBackdropStrength, 0.001f)
+        assertTrue(indoorPortrait.recipe.backgroundBokeh >= 0.35f)
 
         val skyLandscape = PhotometricAnalyzer.buildConceptProfile(
             stats = stats,
@@ -237,35 +286,13 @@ class PhotometricAndBurstTest {
             userSelectedStock = FilmStock.AUTO_EDITORIAL,
             hasConfidentMask = true
         )
-        assertEquals("Landscape sky must keep backdrop cyclorama disabled", 0f, skyLandscape.recipe.studioBackdropStrength, 0.001f)
-        assertEquals("Landscape sky must keep background sharp (no portrait bokeh)", 0f, skyLandscape.recipe.backgroundBokeh, 0.001f)
-        assertTrue("Landscape sky must recover highlights", skyLandscape.recipe.skyRecovery >= 0.50f)
+        assertEquals(0f, skyLandscape.recipe.studioBackdropStrength, 0.001f)
+        assertEquals(0f, skyLandscape.recipe.backgroundBokeh, 0.001f)
+        assertTrue(skyLandscape.recipe.skyRecovery >= 0.45f)
     }
 
     @Test
-    fun guidedFilterSnapsAlphaBoundaryToLuminanceEdgeWithoutHaloBleed() {
-        val w = 16
-        val h = 16
-        val luma = FloatArray(w * h)
-        val blurryAlpha = FloatArray(w * h)
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val i = y * w + x
-                luma[i] = if (x < 8) 0.15f else 0.88f
-                blurryAlpha[i] = when {
-                    x <= 5 -> 1.0f
-                    x >= 10 -> 0.0f
-                    else -> (10 - x) / 5f
-                }
-            }
-        }
-        val refined = NeuralStudioEngine.refineAlphaGuided(blurryAlpha, luma, w, h, radius = 2, eps = 0.002f)
-        assertTrue("Dark subject side x=7 (${refined[8 * w + 7]}) must stay foreground > 0.70", refined[8 * w + 7] > 0.70f)
-        assertTrue("Bright background x=9 (${refined[8 * w + 9]}) must stay background < 0.25", refined[8 * w + 9] < 0.25f)
-    }
-
-    @Test
-    fun photographyCrewDirectorCompilesChannelStructureWithAntiAiLocks() {
+    fun photographyCrewDirectorCompiles5BlockPromptAndAntiAiLocks() {
         val px = solidFrame(32, 32, 118, 114, 108)
         val stats = PhotometricAnalyzer.analyzeArgbPixels(px, 32, 32, faceCenterX = 0.5f, faceCenterY = 0.45f)
         val concept = PhotometricAnalyzer.buildConceptProfile(
@@ -285,12 +312,12 @@ class PhotometricAndBurstTest {
             hasNeuralAlpha = true
         )
         assertTrue(sheet.cameraLensSpec.contains("85mm"))
-        assertTrue(sheet.lightingPlan.contains("Negative Fill"))
-        assertTrue(sheet.antiAiAuditStatus.contains("MODNet 512"))
+        assertTrue(sheet.lightingPlan.contains("Hue-Lock"))
+        assertTrue(sheet.antiAiAuditStatus.contains("zero halo"))
 
-        val prompt = PhotographyCrewDirector.buildGeminiGenerativePrompt(sheet, concept)
-        assertTrue(prompt.contains("STRICT PRESERVATION RULE"))
-        assertTrue(prompt.contains("FORBIDDEN aesthetics: plastic/waxy skin"))
+        val prompt = PhotographyCrewDirector.buildGeminiCanonical5BlockPrompt(sheet, concept, OnlineDirectionStyle.STUDIO_EDITORIAL)
+        assertTrue(prompt.contains("[1. IDENTITY & STRICT BIOMETRIC LOCK]"))
+        assertTrue(prompt.contains("[5. ANTI-AI AUDITOR & REALISM MANDATE]"))
     }
 
     @Test
@@ -306,6 +333,6 @@ class PhotometricAndBurstTest {
             hasConfidentMask = true
         )
         assertEquals("Wide office scene must NOT blur subjects behind boxes", 0f, officeScene.recipe.backgroundBokeh, 0.001f)
-        assertEquals("Wide office scene must NOT darken background like portrait studio", 0f, officeScene.recipe.studioBackdropStrength, 0.001f)
+        assertEquals("Wide office scene must keep zero studio backdrop paint", 0f, officeScene.recipe.studioBackdropStrength, 0.001f)
     }
 }

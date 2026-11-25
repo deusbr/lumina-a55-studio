@@ -87,8 +87,6 @@ fun ReviewStudioScreen(
     var proMist by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.proMistStrength) }
     var bokeh by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.backgroundBokeh) }
     var grain by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.grainAmount) }
-    var relight3d by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.relight3dStrength) }
-    var backdrop by remember(session.concept.recipe) { mutableFloatStateOf(session.concept.recipe.studioBackdropStrength) }
 
     val beforeImg = remember(session.previewOriginalBitmap) { session.previewOriginalBitmap.asImageBitmap() }
     val afterImg = remember(session.previewProcessedBitmap) { session.previewProcessedBitmap.asImageBitmap() }
@@ -467,23 +465,15 @@ fun ReviewStudioScreen(
                 MinimalSlider("Intensidade", state.editIntensity, 0f..1.4f) {
                     viewModel.reprocessActiveSession(intensity = it)
                 }
-                MinimalSlider("Luz 3D Estúdio", relight3d, 0f..1.2f) {
-                    relight3d = it
-                    viewModel.reprocessActiveSession(customRelight3d = it)
-                }
-                MinimalSlider("Fundo Estúdio", backdrop, 0f..1.0f) {
-                    backdrop = it
-                    viewModel.reprocessActiveSession(customBackdrop = it)
-                }
-                MinimalSlider("Bokeh", bokeh, 0f..1.0f) {
+                MinimalSlider("Bokeh Ótico (1-3px)", bokeh, 0f..0.75f) {
                     bokeh = it
                     viewModel.reprocessActiveSession(customBokeh = it)
                 }
-                MinimalSlider("Pro-Mist", proMist, 0f..0.4f) {
+                MinimalSlider("Pro-Mist 1/8", proMist, 0f..0.25f) {
                     proMist = it
                     viewModel.reprocessActiveSession(customProMist = it)
                 }
-                MinimalSlider("Grão", grain, 0f..0.28f) {
+                MinimalSlider("Grão Fino", grain, 0f..0.18f) {
                     grain = it
                     viewModel.reprocessActiveSession(customGrain = it)
                 }
@@ -496,6 +486,7 @@ fun ReviewStudioScreen(
             state = state,
             initialKey = viewModel.currentGeminiApiKey(),
             onSelectMode = { viewModel.selectGeminiOnlineMode(it) },
+            onSelectStyle = { viewModel.selectOnlineDirectionStyle(it) },
             onSaveKey = { viewModel.saveGeminiApiKey(it) },
             onDismiss = { viewModel.openGeminiSettingsDialog(false) }
         )

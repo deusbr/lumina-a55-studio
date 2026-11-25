@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import dev.deusbr.luminaa55.context.PhotographyCrewDirector
 import dev.deusbr.luminaa55.model.GeminiOnlineMode
+import dev.deusbr.luminaa55.model.OnlineDirectionStyle
 import dev.deusbr.luminaa55.model.PhotometricStats
 import dev.deusbr.luminaa55.model.PhotographyCrewSheet
 import dev.deusbr.luminaa55.model.ProcessingEngine
@@ -20,18 +21,23 @@ import java.net.URL
 import kotlin.math.max
 
 data class GeminiOnlineResult(
-    val generatedBitmap: Bitmap?,       // Non-null when Gemini generated a full studio image directly
+    val generatedBitmap: Bitmap?,
     val calibratedConcept: SceneConcept,
     val statusNote: String,
     val usedGenerativeImage: Boolean
 )
 
+private data class AntiAiAuditOutcome(
+    val overallScore: Int,
+    val verdictPt: String,
+    val revisionDeltaPrompt: String
+)
+
 /**
- * Online Studio Engine powered by Google Gemini API.
- * Never embeds any API key in source code: users store their own Gemini key locally on device.
- * Supports:
- * - Full generative studio relighting (gemini-3-pro-image-preview / gemini-3.1-flash-image-preview / gemini-2.5-flash-image)
- * - Online 6-agent Vision Crew Director calibrating the on-device GPU engine (works on Free Tier too)
+ * Online Studio Engine powered by Google Gemini API (Lumina A55 v5.0):
+ * - Canonical 5-block generative prompt with selectable OnlineDirectionStyle
+ * - Gemini Vision Auditor Anti-IA quality gate (scores returned image; 1 automatic retry if < 8/10)
+ * - Transparent fallback to Free-Tier Vision Director / Offline Editorial Limpo OKLab on HTTP 429 (limit: 0)
  */
 class GeminiStudioService(context: Context) {
 
@@ -52,6 +58,7 @@ class GeminiStudioService(context: Context) {
         labels: List<String>,
         faceCount: Int,
         mode: GeminiOnlineMode,
+        directionStyle: OnlineDirectionStyle = OnlineDirectionStyle.STUDIO_EDITORIAL,
         hasNeuralAlpha: Boolean
     ): GeminiOnlineResult = withContext(Dispatchers.IO) {
         val apiKey = getSavedApiKey()
@@ -69,14 +76,12 @@ class GeminiStudioService(context: Context) {
         val encodedJpeg = encodeDownscaledJpegBase64(sourceBitmap, maxDim = if (mode.outputsImageDirectly) 1536 else 1024)
 
         if (mode.outputsImageDirectly) {
-            val imagePrompt = PhotographyCrewDirector.buildGeminiGenerativePrompt(baseSheet, baseConcept)
+            val basePrompt = PhotographyCrewDirector.buildGeminiCanonical5BlockPrompt(baseSheet, baseConcept, directionStyle)
             val candidates = listOf(
                 mode.modelId,
                 "gemini-3.1-flash-image-preview",
-                "gemini-3.1-flash-image",
                 "gemini-2.5-flash-image",
-                "gemini-3-pro-image-preview",
-                "gemini-3-pro-image"
+                "gemini-3-pro-image-preview"
             ).distinct()
             var lastQuotaError: String? = null
             var lastHttpError: String? = null
@@ -85,24 +90,51 @@ class GeminiStudioService(context: Context) {
                 val resp = postGenerateContent(
                     apiKey = apiKey,
                     modelId = modelId,
-                    textPrompt = imagePrompt,
+                    textPrompt = basePrompt,
                     base64Jpeg = encodedJpeg,
                     responseModalities = listOf("TEXT", "IMAGE"),
                     responseMimeType = null
                 )
                 if (resp.isOk) {
-                    val imgBmp = resp.imageBytes?.let { bytes ->
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    }
-                    if (imgBmp != null) {
+                    var bestBmp = resp.imageBytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                    if (bestBmp != null) {
+                        var audit = runAntiAiVisionAudit(apiKey, bestBmp)
+                        if (audit != null && audit.overallScore < 8 && audit.revisionDeltaPrompt.isNotBlank()) {
+                            val retryPrompt = "$basePrompt\n\n[6. AUDITOR REVISION FIX]: ${audit.revisionDeltaPrompt}"
+                            val retryResp = postGenerateContent(
+                                apiKey = apiKey,
+                                modelId = modelId,
+                                textPrompt = retryPrompt,
+                                base64Jpeg = encodedJpeg,
+                                responseModalities = listOf("TEXT", "IMAGE"),
+                                responseMimeType = null
+                            )
+                            val retryBmp = retryResp.imageBytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                            if (retryBmp != null) {
+                                val retryAudit = runAntiAiVisionAudit(apiKey, retryBmp)
+                                if (retryAudit == null || retryAudit.overallScore >= audit.overallScore) {
+                                    bestBmp.recycle()
+                                    bestBmp = retryBmp
+                                    if (retryAudit != null) audit = retryAudit
+                                } else {
+                                    retryBmp.recycle()
+                                }
+                            }
+                        }
+
+                        val auditLine = if (audit != null) {
+                            "Auditor Anti-IA: ${audit.overallScore}/10 · ${audit.verdictPt}"
+                        } else {
+                            "Auditor Anti-IA (Gemini): 5 Blocos aplicados (${directionStyle.label})."
+                        }
                         val updatedSheet = baseSheet.copy(
-                            engineUsedLabel = "Online · $modelId",
-                            antiAiAuditStatus = "Auditor Anti-IA (Gemini): Revelação gerada na nuvem com trava biométrica."
+                            engineUsedLabel = "Online · $modelId · ${directionStyle.label}",
+                            antiAiAuditStatus = auditLine
                         )
                         return@withContext GeminiOnlineResult(
-                            generatedBitmap = imgBmp,
+                            generatedBitmap = bestBmp,
                             calibratedConcept = baseConcept.copy(crewSheet = updatedSheet),
-                            statusNote = "Gemini Estúdio ($modelId): revelação gerada na nuvem.",
+                            statusNote = "Gemini Estúdio (${directionStyle.label}) · $auditLine",
                             usedGenerativeImage = true
                         )
                     }
@@ -116,7 +148,29 @@ class GeminiStudioService(context: Context) {
             }
 
             if (lastQuotaError != null) {
-                error("Sua chave Gemini está sem cota de geração de imagem (HTTP 429). Ative o faturamento no Google AI Studio ou selecione 'Gemini Diretor + GPU Local' na chave (🔑).")
+                // Transparent fallback: try Vision Director calibration on Free Tier, or clean Offline Editorial Limpo OKLab
+                val directorFallback = runCatching {
+                    runVisionDirectorOnline(
+                        apiKey = apiKey,
+                        base64Jpeg = encodedJpeg,
+                        baseConcept = baseConcept,
+                        baseSheet = baseSheet,
+                        stats = stats,
+                        fallbackBanner = "Sem cota de imagem Gemini (HTTP 429) — fallback transparente: Editorial Limpo OKLab calibrado"
+                    )
+                }.getOrNull()
+                if (directorFallback != null) return@withContext directorFallback
+
+                val offlineSheet = baseSheet.copy(
+                    engineUsedLabel = "Fallback Offline · Editorial Limpo",
+                    antiAiAuditStatus = "HTTP 429 na API de imagem Gemini — renderizado via OKLab Editorial Limpo local."
+                )
+                return@withContext GeminiOnlineResult(
+                    generatedBitmap = null,
+                    calibratedConcept = baseConcept.copy(crewSheet = offlineSheet),
+                    statusNote = "Gemini sem cota de imagem (HTTP 429) — fallback transparente para Offline · Editorial Limpo.",
+                    usedGenerativeImage = false
+                )
             }
             error("Gemini Estúdio falhou (${lastHttpError ?: "sem resposta de imagem"}). Tente novamente ou use o Motor Offline.")
         }
@@ -126,8 +180,42 @@ class GeminiStudioService(context: Context) {
             base64Jpeg = encodedJpeg,
             baseConcept = baseConcept,
             baseSheet = baseSheet,
-            stats = stats
+            stats = stats,
+            fallbackBanner = null
         )
+    }
+
+    private fun runAntiAiVisionAudit(apiKey: String, generatedBitmap: Bitmap): AntiAiAuditOutcome? {
+        val auditJpeg = encodeDownscaledJpegBase64(generatedBitmap, maxDim = 1024)
+        val prompt = PhotographyCrewDirector.buildAntiAiAuditPrompt()
+        val candidates = listOf("gemini-2.5-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest")
+        for (modelId in candidates) {
+            val resp = postGenerateContent(
+                apiKey = apiKey,
+                modelId = modelId,
+                textPrompt = prompt,
+                base64Jpeg = auditJpeg,
+                responseModalities = null,
+                responseMimeType = "application/json"
+            )
+            if (resp.isOk && !resp.textContent.isNullOrBlank()) {
+                val parsed = runCatching {
+                    val cleaned = resp.textContent.trim()
+                        .removePrefix("```json")
+                        .removePrefix("```")
+                        .removeSuffix("```")
+                        .trim()
+                    val obj = JSONObject(cleaned)
+                    AntiAiAuditOutcome(
+                        overallScore = obj.optInt("overallScore", 8).coerceIn(1, 10),
+                        verdictPt = obj.optString("verdictPt", "Realismo fotográfico aprovado").take(72),
+                        revisionDeltaPrompt = obj.optString("revisionDeltaPrompt", "")
+                    )
+                }.getOrNull()
+                if (parsed != null) return parsed
+            }
+        }
+        return null
     }
 
     private fun runVisionDirectorOnline(
@@ -135,7 +223,8 @@ class GeminiStudioService(context: Context) {
         base64Jpeg: String,
         baseConcept: SceneConcept,
         baseSheet: PhotographyCrewSheet,
-        stats: PhotometricStats
+        stats: PhotometricStats,
+        fallbackBanner: String?
     ): GeminiOnlineResult {
         val prompt = PhotographyCrewDirector.buildGeminiVisionDirectorPrompt(baseConcept, stats)
         val candidates = listOf("gemini-2.5-flash-lite", "gemini-3-flash-preview", "gemini-3.8-flash", "gemini-flash-latest")
@@ -152,10 +241,11 @@ class GeminiStudioService(context: Context) {
             )
             if (resp.isOk && !resp.textContent.isNullOrBlank()) {
                 val parsed = parseDirectorCalibration(resp.textContent, baseConcept, baseSheet, modelId)
+                val note = fallbackBanner ?: "Banca Gemini Vision ($modelId) calibrou motor OKLab GPU."
                 return GeminiOnlineResult(
                     generatedBitmap = null,
                     calibratedConcept = parsed,
-                    statusNote = "Banca Gemini Vision ($modelId) calibrou ótica, luz 3D e filme na GPU.",
+                    statusNote = note,
                     usedGenerativeImage = false
                 )
             }
@@ -183,18 +273,19 @@ class GeminiStudioService(context: Context) {
             val r = baseConcept.recipe
             val allowPortraitBokeh = baseConcept.recipe.backgroundBokeh > 0.05f
             val updatedRecipe = r.copy(
-                exposureOffset = obj.optDouble("exposureOffset", r.exposureOffset.toDouble()).toFloat().coerceIn(-0.25f, 0.35f),
-                contrast = obj.optDouble("contrast", r.contrast.toDouble()).toFloat().coerceIn(1.02f, 1.28f),
-                dehazeAmount = obj.optDouble("dehazeAmount", r.dehazeAmount.toDouble()).toFloat().coerceIn(0.01f, 0.11f),
-                warmth = obj.optDouble("warmth", r.warmth.toDouble()).toFloat().coerceIn(-0.08f, 0.09f),
-                tint = obj.optDouble("tint", r.tint.toDouble()).toFloat().coerceIn(-0.05f, 0.05f),
-                saturation = obj.optDouble("saturation", r.saturation.toDouble()).toFloat().coerceIn(0.92f, 1.16f),
-                faceRelightGain = obj.optDouble("faceRelightGain", r.faceRelightGain.toDouble()).toFloat().coerceIn(0f, 0.36f),
-                relight3dStrength = obj.optDouble("relight3dStrength", r.relight3dStrength.toDouble()).toFloat().coerceIn(0f, 1.05f),
-                backgroundBokeh = if (allowPortraitBokeh) obj.optDouble("backgroundBokeh", r.backgroundBokeh.toDouble()).toFloat().coerceIn(0f, 1.0f) else 0f,
-                backgroundDimming = if (allowPortraitBokeh) obj.optDouble("backgroundDimming", r.backgroundDimming.toDouble()).toFloat().coerceIn(0f, 0.45f) else 0f,
-                studioBackdropStrength = if (allowPortraitBokeh) obj.optDouble("studioBackdropStrength", r.studioBackdropStrength.toDouble()).toFloat().coerceIn(0f, 0.65f) else 0f,
-                clarity = obj.optDouble("clarity", r.clarity.toDouble()).toFloat().coerceIn(0.08f, 0.32f),
+                exposureOffset = obj.optDouble("exposureOffset", r.exposureOffset.toDouble()).toFloat().coerceIn(-0.20f, 0.28f),
+                contrast = obj.optDouble("contrast", r.contrast.toDouble()).toFloat().coerceIn(1.02f, 1.22f),
+                dehazeAmount = obj.optDouble("dehazeAmount", r.dehazeAmount.toDouble()).toFloat().coerceIn(0.01f, 0.08f),
+                warmth = obj.optDouble("warmth", r.warmth.toDouble()).toFloat().coerceIn(-0.06f, 0.06f),
+                tint = obj.optDouble("tint", r.tint.toDouble()).toFloat().coerceIn(-0.05f, 0.03f),
+                saturation = obj.optDouble("saturation", r.saturation.toDouble()).toFloat().coerceIn(0.94f, 1.12f),
+                faceRelightGain = obj.optDouble("faceRelightGain", r.faceRelightGain.toDouble()).toFloat().coerceIn(0f, 0.24f),
+                relight3dStrength = 0.0f,
+                backgroundBokeh = if (allowPortraitBokeh) obj.optDouble("backgroundBokeh", r.backgroundBokeh.toDouble()).toFloat().coerceIn(0f, 0.70f) else 0f,
+                backgroundDimming = if (allowPortraitBokeh) obj.optDouble("backgroundDimming", r.backgroundDimming.toDouble()).toFloat().coerceIn(0f, 0.20f) else 0f,
+                studioBackdropStrength = 0.0f,
+                clarity = obj.optDouble("clarity", r.clarity.toDouble()).toFloat().coerceIn(0.08f, 0.26f),
+                proMistStrength = obj.optDouble("proMistStrength", r.proMistStrength.toDouble()).toFloat().coerceIn(0.04f, 0.14f),
                 keyDirectionSign = if (obj.optDouble("keyDirectionSign", r.keyDirectionSign.toDouble()) >= 0.0) 1.0f else -1.0f
             )
             val updatedSheet = baseSheet.copy(
@@ -203,7 +294,7 @@ class GeminiStudioService(context: Context) {
                 lightingPlan = obj.optString("lightingPlan", baseSheet.lightingPlan).ifBlank { baseSheet.lightingPlan },
                 consistencyGuardLock = obj.optString("consistencyGuardLock", baseSheet.consistencyGuardLock).ifBlank { baseSheet.consistencyGuardLock },
                 antiAiAuditStatus = obj.optString("antiAiAuditStatus", baseSheet.antiAiAuditStatus).ifBlank { baseSheet.antiAiAuditStatus },
-                engineUsedLabel = "Online · $modelId + GPU"
+                engineUsedLabel = "Online · $modelId + GPU OKLab"
             )
             baseConcept.copy(
                 conceptTitle = obj.optString("conceptTitle", baseConcept.conceptTitle).ifBlank { baseConcept.conceptTitle },
@@ -212,7 +303,7 @@ class GeminiStudioService(context: Context) {
                 crewSheet = updatedSheet
             )
         }.getOrElse {
-            baseConcept.copy(crewSheet = baseSheet.copy(engineUsedLabel = "Online · $modelId (fallback)"))
+            baseConcept.copy(crewSheet = baseSheet.copy(engineUsedLabel = "Online · $modelId (fallback OKLab)"))
         }
     }
 

@@ -7,8 +7,17 @@ enum class ProcessingEngine(
     val shortLabel: String,
     val subtitle: String
 ) {
-    OFFLINE_LOCAL("Offline · GPU + MODNet", "Offline", "100% local · Zero nuvem"),
-    ONLINE_GEMINI("Online · Gemini Estúdio", "Gemini", "Banca do canal + API Gemini")
+    OFFLINE_LOCAL("Offline · OKLab GPU", "Offline", "Capture One / Leica · 100% local"),
+    ONLINE_GEMINI("Online · Gemini Estúdio", "Gemini", "Banca 5 Blocos + Auditor Anti-IA")
+}
+
+enum class OnlineDirectionStyle(
+    val label: String,
+    val description: String
+) {
+    SUBTLE_RETOUCH("Ajuste Sutil", "Limpa névoa e refina luz preservando pose, roupa e cenário idênticos"),
+    STUDIO_EDITORIAL("Estúdio 85mm", "Octabox 45°, Negative Fill, catchlights reais e separação de estúdio"),
+    CINEMA_TRAILER("Cinema 35mm", "Contraste chiaroscuro 5:1, separação Kelvin 3400K/6500K e Pro-Mist 1/8")
 }
 
 enum class GeminiOnlineMode(
@@ -20,19 +29,19 @@ enum class GeminiOnlineMode(
     STUDIO_IMAGE_FLASH(
         modelId = "gemini-3.1-flash-image-preview",
         label = "Gemini Flash Image (Nuvem)",
-        description = "Gera revelação completa em estúdio na nuvem (requer cota/faturamento na chave Gemini)",
+        description = "Gera revelação em estúdio com Auditor Anti-IA (requer cota na chave)",
         outputsImageDirectly = true
     ),
     STUDIO_IMAGE_PRO(
         modelId = "gemini-3-pro-image-preview",
         label = "Gemini Pro Image (Estúdio Max)",
-        description = "Máxima fidelidade fotográfica na nuvem (requer cota/faturamento na chave Gemini)",
+        description = "Máxima fidelidade fotográfica + Auditor Anti-IA (requer cota na chave)",
         outputsImageDirectly = true
     ),
     VISION_CREW_DIRECTOR(
         modelId = "gemini-3.8-flash",
-        label = "Gemini Diretor + GPU Local",
-        description = "Banca de 6 especialistas analisa a foto na nuvem e calibra a GPU local (plano gratuito)",
+        label = "Gemini Diretor + GPU OKLab",
+        description = "Banca analisa a foto online e calibra o motor OKLab local (plano gratuito)",
         outputsImageDirectly = false
     )
 }
@@ -54,7 +63,7 @@ enum class CameraExperienceMode(val label: String) {
 
 enum class ProDeckTab(val label: String) {
     EXPOSURE("Exposição"),
-    FILM("Película"),
+    FILM("Presets"),
     ENGINE("Motor")
 }
 
@@ -63,12 +72,12 @@ enum class FilmStock(
     val subtitle: String,
     val badge: String
 ) {
-    AUTO_EDITORIAL("Auto Ensaio", "Motor contextual decide o look", "AUTO"),
-    PORTRA_400("Portra 400", "Pele cremosa e contraste editorial", "P400"),
-    CINESTILL_800T("CineStill 800T", "Noturno urbano com halation quente", "800T"),
-    HASSELBLAD_NATURAL("Hasselblad HNCS", "Cores puras de estúdio médio formato", "HNCS"),
-    KODAK_GOLD_200("Gold 200", "Dourado solar e sombras acolhedoras", "G200"),
-    LEICA_MONOCHROME("Leica Mono", "Preto e branco dramático de prata", "MONO")
+    AUTO_EDITORIAL("Auto Banca", "Diretor escolhe o melhor preset", "AUTO"),
+    RETRATO_EDITORIAL("Editorial Limpo", "5400K · curva Capture One · foco ocular", "EDIT"),
+    LUZ_NATURAL("Luz Natural", "5200K · janela suave 2:1 · sombras abertas", "LUZ"),
+    GOLDEN_FILM("Golden Film", "Portra 400 · Pro-Mist 1/8 · calor sutil", "P400"),
+    CINEMA_CHIAROSCURO("Cinema", "3400K/6500K · chiaroscuro com hue-lock", "CINE"),
+    PRATA_MONOCHROME("P&B Prata", "Gelatina prata melanin-safe", "P&B")
 }
 
 enum class LensOption(
@@ -135,7 +144,8 @@ data class PhotometricStats(
     val topLuma: Float,
     val centerLuma: Float,
     val lightDirection: LightDirection,
-    val shadowFloorLuma: Float = 0f
+    val shadowFloorLuma: Float = 0f,
+    val greenCastBias: Float = 0f
 )
 
 data class StudioLightingHint(

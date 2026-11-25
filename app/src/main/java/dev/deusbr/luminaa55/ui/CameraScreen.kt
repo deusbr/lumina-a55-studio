@@ -76,6 +76,7 @@ import dev.deusbr.luminaa55.model.CaptureMode
 import dev.deusbr.luminaa55.model.FilmStock
 import dev.deusbr.luminaa55.model.GeminiOnlineMode
 import dev.deusbr.luminaa55.model.LensOption
+import dev.deusbr.luminaa55.model.OnlineDirectionStyle
 import dev.deusbr.luminaa55.model.ProDeckTab
 import dev.deusbr.luminaa55.model.ProcessingEngine
 
@@ -469,6 +470,7 @@ fun CameraScreen(
             state = state,
             initialKey = viewModel.currentGeminiApiKey(),
             onSelectMode = { viewModel.selectGeminiOnlineMode(it) },
+            onSelectStyle = { viewModel.selectOnlineDirectionStyle(it) },
             onSaveKey = { viewModel.saveGeminiApiKey(it) },
             onDismiss = { viewModel.openGeminiSettingsDialog(false) }
         )
@@ -755,6 +757,7 @@ internal fun GeminiSettingsDialog(
     state: LuminaUiState,
     initialKey: String,
     onSelectMode: (GeminiOnlineMode) -> Unit,
+    onSelectStyle: (OnlineDirectionStyle) -> Unit,
     onSaveKey: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -764,15 +767,57 @@ internal fun GeminiSettingsDialog(
         containerColor = LuminaColors.PanelSurface,
         titleContentColor = LuminaColors.InkPrimary,
         textContentColor = LuminaColors.InkSecondary,
-        title = { Text("Motor Online · API Gemini", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+        title = { Text("Motor Online · Banca 5 Blocos", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    "Escolha como a banca de 6 especialistas (Diretor, Lentes, Iluminação, Guardião e Auditor Anti-IA) usa a API do Gemini:",
-                    fontSize = 12.sp
+                    "Estilo de direção (prompt 5 blocos + Auditor Anti-IA):",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = LuminaColors.InkPrimary
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OnlineDirectionStyle.entries.forEach { style ->
+                        val activeStyle = state.onlineDirectionStyle == style
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (activeStyle) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.25f))
+                                .border(
+                                    1.dp,
+                                    if (activeStyle) LuminaColors.OpticalAmber else LuminaColors.HairlineBorder,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { onSelectStyle(style) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                style.label,
+                                color = if (activeStyle) LuminaColors.OpticalAmber else LuminaColors.InkPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+                Text(
+                    state.onlineDirectionStyle.description,
+                    fontSize = 10.sp,
+                    color = LuminaColors.InkSecondary
+                )
+                Text(
+                    "Modo da API Gemini:",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = LuminaColors.InkPrimary
                 )
                 GeminiOnlineMode.entries.forEach { mode ->
                     val active = state.geminiOnlineMode == mode
