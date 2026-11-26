@@ -20,8 +20,5 @@ Editorial computational-photography camera app crafted for the **Samsung Galaxy 
 ./gradlew testDebugUnitTest assembleRelease
 ```
 
-## Resumo em Português (PT-BR)
-App Android nativo (Kotlin + Jetpack Compose + CameraX/Camera2 + ML Kit/TFLite offline + shaders AGSL OKLab na GPU) pensado para extrair o máximo das câmeras do **Samsung Galaxy A55**, entregando fotos com aparência natural de ensaio profissional nos presets **Editorial Limpo**, **Luz Natural**, **Golden Film**, **Cinema** e **P&B Prata** — além de integração opcional com o Gemini online via prompt em 5 blocos e Auditor Anti-IA.
-
 ## License
 [MIT](LICENSE) — Emerson Almeida (`@deusbr`)
